@@ -1,0 +1,108 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>HttpFramework 综合测试服务器</title>
+    <style>
+        body { font-family: Arial, sans-serif; margin: 40px; background: #f5f5f5; }
+        .container { max-width: 1200px; margin: 0 auto; background: white; padding: 30px; border-radius: 10px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }
+        .header { text-align: center; margin-bottom: 30px; }
+        .section { margin: 20px 0; padding: 20px; border: 1px solid #ddd; border-radius: 5px; }
+        .endpoint { background: #f8f9fa; padding: 10px; margin: 10px 0; border-radius: 5px; border-left: 4px solid #007bff; }
+        .method { font-weight: bold; color: #007bff; }
+        .description { color: #666; margin-top: 5px; }
+        .status { display: inline-block; padding: 5px 10px; border-radius: 3px; font-size: 12px; font-weight: bold; }
+        .status.online { background: #d4edda; color: #155724; }
+        .status.offline { background: #f8d7da; color: #721c24; }
+        .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 20px; }
+        a { color: #007bff; text-decoration: none; }
+        a:hover { text-decoration: underline; color: #0056b3; }
+        .endpoint a { font-weight: bold; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1> HttpFramework 综合测试服务器</h1>
+        </div>
+        
+        <div class="grid">
+            <div class="section">
+                <h3> API接口</h3>
+                <div class="endpoint">
+                    <span class="method">GET</span> <a href="/api/status">/api/status</a><br>
+                    <span class="description">获取服务器状态信息</span>
+                </div>
+                <div class="endpoint">
+                    <span class="method">GET</span> <a href="/api/time">/api/time</a><br>
+                    <span class="description">获取当前服务器时间</span>
+                </div>
+                <div class="endpoint">
+                    <span class="method">POST</span> /api/echo<br>
+                    <span class="description">回显POST数据 (使用curl测试)</span>
+                </div>
+            </div>
+            
+            <div class="section">
+                <h3> 会话管理</h3>
+                <div class="endpoint">
+                    <span class="method">GET</span> <a href="/session/info">/session/info</a><br>
+                    <span class="description">查看当前会话信息</span>
+                </div>
+                <div class="endpoint">
+                    <span class="method">GET</span> <a href="/session/stats">/session/stats</a><br>
+                    <span class="description">会话统计信息</span>
+                </div>
+                <div class="endpoint">
+                    <span class="method">POST</span> /session/set<br>
+                    <span class="description">设置会话数据 (使用curl测试)</span>
+                </div>
+            </div>
+            
+            <div class="section">
+                <h3> 数据库功能</h3>
+                <div class="endpoint">
+                    <span class="method">GET</span> <a href="/db/test">/db/test</a><br>
+                    <span class="description">测试数据库连接</span>
+                </div>
+                <div class="endpoint">
+                    <span class="method">GET</span> <a href="/db/users">/db/users</a><br>
+                    <span class="description">查看所有用户</span>
+                </div>
+                <div class="endpoint">
+                    <span class="method">GET</span> <a href="/db/add-user">/db/add-user</a><br>
+                    <span class="description">添加用户表单</span>
+                </div>
+            </div>
+            
+        </div>
+        
+        <div class="section">
+            <h3> 系统信息</h3>
+            <p><strong>HTTP服务器:</strong> http://localhost:8080</p>
+            <p><strong>数据库:</strong> MySQL (httpframework)</p>
+            <p><strong>会话管理:</strong> 已启用 (30分钟过期)</p>
+            <p><strong>连接池:</strong> 5 个连接</p>
+        </div>
+        
+        <div class="section">
+            <h3> 快速测试</h3>
+            <p>点击上面的链接测试各个功能，或者使用curl命令：</p>
+            <pre style="background: #f8f9fa; padding: 10px; border-radius: 5px; overflow-x: auto;">
+# 测试API
+curl http://localhost:8080/api/status
+curl http://localhost:8080/api/time
+
+# 测试会话
+curl http://localhost:8080/session/info
+
+# 测试数据库
+curl http://localhost:8080/db/test
+curl http://localhost:8080/db/users
+
+# 测试POST请求
+curl -X POST http://localhost:8080/api/echo -d "Hello World"
+            </pre>
+        </div>
+    </div>
+</body>
+</html>

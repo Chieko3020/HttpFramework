@@ -1,0 +1,109 @@
+# Build directories (out-of-source build)
+build/
+Build/
+BUILD/
+cmake-build-*/
+
+# CMake generated files
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+Makefile
+*.cmake
+!CMakeLists.txt
+compile_commands.json
+CTestTestfile.cmake
+DartConfiguration.tcl
+Testing/
+CPackConfig.cmake
+CPackSourceConfig.cmake
+
+# CMake FetchContent
+_deps/
+
+# Ninja build system
+*.ninja
+.ninja_deps
+.ninja_log
+
+# Compiled Object files
+*.o
+*.obj
+*.lo
+*.la
+
+# Static libraries
+*.a
+*.lib
+
+# Shared libraries
+*.so
+*.so.*
+*.dylib
+*.dll
+
+# Executables (build outputs)
+hello_world
+full_demo
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS generated files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Temporary files
+*.tmp
+*.temp
+*.log
+
+# Core dumps
+core
+core.*
+*.core
+
+# Coverage files
+*.gcda
+*.gcno
+*.gcov
+coverage/
+html/
+
+# Database files
+*.db
+*.sqlite
+*.sqlite3
+
+# Configuration files with sensitive data
+config.ini
+.env
+*.key
+*.pem
+*.crt
+
+# Backup files
+*.bak
+*.backup
+
+# AI / tooling
+.specstory/
+.claude/
+.cache/
+
+# Packaging
+*.deb
+*.rpm
+*.tar.gz
+*.tar.xz
+*.zip
+*.app

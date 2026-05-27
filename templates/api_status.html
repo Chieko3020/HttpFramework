@@ -1,0 +1,55 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>API状态 - HttpFramework</title>
+    <style>
+        body { font-family: Arial, sans-serif; margin: 40px; background: #f5f5f5; }
+        .container { max-width: 800px; margin: 0 auto; background: white; padding: 30px; border-radius: 10px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }
+        .header { text-align: center; margin-bottom: 30px; }
+        .status-item { margin: 15px 0; padding: 15px; background: #f8f9fa; border-radius: 5px; border-left: 4px solid #28a745; }
+        .status-label { font-weight: bold; color: #495057; }
+        .status-value { color: #28a745; margin-left: 10px; }
+        .back-link { display: inline-block; margin-top: 20px; padding: 10px 20px; background: #007bff; color: white; text-decoration: none; border-radius: 5px; }
+        .back-link:hover { background: #0056b3; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>API状态信息</h1>
+        </div>
+        
+        <div class="status-item">
+            <span class="status-label">服务器状态:</span>
+            <span class="status-value">运行中</span>
+        </div>
+        
+        <div class="status-item">
+            <span class="status-label">架构模式:</span>
+            <span class="status-value">Reactor + 线程池</span>
+        </div>
+        
+        <div class="status-item">
+            <span class="status-label">监听端口:</span>
+            <span class="status-value">8080</span>
+        </div>
+        
+        <div class="status-item">
+            <span class="status-label">协议版本:</span>
+            <span class="status-value">HTTP/1.1</span>
+        </div>
+        
+        <div class="status-item">
+            <span class="status-label">当前时间:</span>
+            <span class="status-value">{{CURRENT_TIME}}</span>
+        </div>
+        
+        <div class="status-item">
+            <span class="status-label">服务器版本:</span>
+            <span class="status-value">HttpFramework v1.0.0</span>
+        </div>
+        
+        <a href="/" class="back-link">← 返回首页</a>
+    </div>
+</body>
+</html>

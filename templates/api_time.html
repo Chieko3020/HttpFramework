@@ -1,0 +1,53 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>服务器时间 - HttpFramework</title>
+    <style>
+        body { font-family: Arial, sans-serif; margin: 40px; background: #f5f5f5; }
+        .container { max-width: 800px; margin: 0 auto; background: white; padding: 30px; border-radius: 10px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }
+        .header { text-align: center; margin-bottom: 30px; }
+        .time-display { text-align: center; margin: 30px 0; }
+        .time-main { font-size: 3em; font-weight: bold; color: #007bff; margin-bottom: 10px; }
+        .time-details { color: #6c757d; font-size: 1.1em; }
+        .time-item { margin: 15px 0; padding: 15px; background: #f8f9fa; border-radius: 5px; border-left: 4px solid #007bff; }
+        .time-label { font-weight: bold; color: #495057; }
+        .time-value { color: #007bff; margin-left: 10px; }
+        .back-link { display: inline-block; margin-top: 20px; padding: 10px 20px; background: #007bff; color: white; text-decoration: none; border-radius: 5px; }
+        .back-link:hover { background: #0056b3; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>服务器时间</h1>
+        </div>
+        
+        <div class="time-display">
+            <div class="time-main">{{CURRENT_TIME}}</div>
+            <div class="time-details">当前服务器时间</div>
+        </div>
+        
+        <div class="time-item">
+            <span class="time-label">日期时间:</span>
+            <span class="time-value">{{CURRENT_TIME}}</span>
+        </div>
+        
+        <div class="time-item">
+            <span class="time-label">时间戳:</span>
+            <span class="time-value">{{TIMESTAMP}}</span>
+        </div>
+        
+        <div class="time-item">
+            <span class="time-label">时区:</span>
+            <span class="time-value">本地时间</span>
+        </div>
+        
+        <div class="time-item">
+            <span class="status-label">服务器:</span>
+            <span class="time-value">HttpFramework v1.0.0</span>
+        </div>
+        
+        <a href="/" class="back-link">← 返回首页</a>
+    </div>
+</body>
+</html>

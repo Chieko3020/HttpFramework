@@ -1,0 +1,51 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>会话信息 - HttpFramework</title>
+    <style>
+        body { font-family: Arial, sans-serif; margin: 40px; background: #f5f5f5; }
+        .container { max-width: 800px; margin: 0 auto; background: white; padding: 30px; border-radius: 10px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }
+        .header { text-align: center; margin-bottom: 30px; }
+        .session-item { margin: 15px 0; padding: 15px; background: #f8f9fa; border-radius: 5px; border-left: 4px solid #17a2b8; }
+        .session-label { font-weight: bold; color: #495057; }
+        .session-value { color: #17a2b8; margin-left: 10px; word-break: break-all; }
+        .session-id { font-family: monospace; background: #e9ecef; padding: 5px; border-radius: 3px; }
+        .back-link { display: inline-block; margin-top: 20px; padding: 10px 20px; background: #007bff; color: white; text-decoration: none; border-radius: 5px; }
+        .back-link:hover { background: #0056b3; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>会话信息</h1>
+        </div>
+        
+        <div class="session-item">
+            <span class="session-label">会话ID:</span>
+            <span class="session-value session-id">{{SESSION_ID}}</span>
+        </div>
+        
+        <div class="session-item">
+            <span class="session-label">最后访问:</span>
+            <span class="session-value">{{LAST_ACCESS}}</span>
+        </div>
+        
+        <div class="session-item">
+            <span class="session-label">访问次数:</span>
+            <span class="session-value">{{VISIT_COUNT}}</span>
+        </div>
+        
+        <div class="session-item">
+            <span class="session-label">用户代理:</span>
+            <span class="session-value">{{USER_AGENT}}</span>
+        </div>
+        
+        <div class="session-item">
+            <span class="session-label">会话状态:</span>
+            <span class="session-value">有效</span>
+        </div>
+        
+        <a href="/" class="back-link">← 返回首页</a>
+    </div>
+</body>
+</html>

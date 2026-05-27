@@ -1,0 +1,53 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>用户列表 - HttpFramework</title>
+    <style>
+        body { font-family: Arial, sans-serif; margin: 40px; background: #f5f5f5; }
+        .container { max-width: 1000px; margin: 0 auto; background: white; padding: 30px; border-radius: 10px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }
+        .header { text-align: center; margin-bottom: 30px; }
+        .user-table { width: 100%; border-collapse: collapse; margin: 20px 0; }
+        .user-table th, .user-table td { padding: 12px; text-align: left; border-bottom: 1px solid #ddd; }
+        .user-table th { background-color: #f8f9fa; font-weight: bold; color: #495057; }
+        .user-table tr:hover { background-color: #f5f5f5; }
+        .user-count { background: #d4edda; color: #155724; padding: 15px; border-radius: 5px; margin: 20px 0; border-left: 4px solid #28a745; }
+        .back-link { display: inline-block; margin-top: 20px; padding: 10px 20px; background: #007bff; color: white; text-decoration: none; border-radius: 5px; }
+        .back-link:hover { background: #0056b3; }
+        .add-link { display: inline-block; margin-left: 10px; padding: 10px 20px; background: #28a745; color: white; text-decoration: none; border-radius: 5px; }
+        .add-link:hover { background: #218838; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>用户列表</h1>
+        </div>
+        
+        <div class="user-count">
+            <strong>数据库用户统计</strong><br>
+            显示 httpframework 数据库中的所有用户信息
+        </div>
+        
+        <table class="user-table">
+            <thead>
+                <tr>
+                    <th>用户名</th>
+                    <th>密码</th>
+                </tr>
+            </thead>
+            <tbody>
+                {{USER_ROWS}}
+            </tbody>
+        </table>
+        
+        <div style="text-align: center; margin: 20px 0;">
+            <strong>总用户数: {{USER_COUNT}}</strong>
+        </div>
+        
+        <div style="text-align: center;">
+            <a href="/" class="back-link">← 返回首页</a>
+            <a href="/db/add-user" class="add-link">+ 添加用户</a>
+        </div>
+    </div>
+</body>
+</html>
