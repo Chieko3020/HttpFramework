@@ -39,7 +39,7 @@ cmake --install build --prefix /usr/local
 
 ## 两种使用方式
 
-推荐使用 `http::App` 门面类——它将 Router、HttpServer、SessionManager、DbConnectionPool 封装在一起，提供链式 API，大幅减少样板代码。
+推荐使用 `http::App` 类，将 Router、HttpServer、SessionManager、DbConnectionPool 封装在一起，提供链式 API，大幅减少样板代码。
 
 ### 方式一：编写代码
 
