@@ -1,6 +1,6 @@
 # HttpFramework
 
-- Linux 下 C++ HTTP/1.1 服务框架，基于多 Reactor + 线程池架构（main Reactor accept + sub Reactor I/O + 线程池业务），实现 Web 应用快速开发与部署
+- Linux 下 C++ HTTP/1.1 服务框架，基于多 Reactor + 线程池架构（main Reactor accept + sub Reactor I/O + 线程池业务），实现 C++ 项目快速导入并搭载 HTTP 服务
 - epoll ET 模式 + 非阻塞 I/O，支持高并发
 - 路由系统：静态路由、动态路由（`:id`）、通配符路由、正则匹配
 - 中间件系统：链式处理，支持路径过滤，易于扩展
