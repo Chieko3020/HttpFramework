@@ -48,6 +48,8 @@ if(ENABLE_WSS)
         wss/OpenSslHelpers.cpp
         wss/WssReactor.cpp
         wss/WsRouter.cpp
+        wss/Crc32.cpp
+        wss/FileTransferPlugin.cpp
     )
     target_sources(http_framework PRIVATE ${WSS_SOURCES})
 

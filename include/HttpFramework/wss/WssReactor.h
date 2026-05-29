@@ -24,6 +24,7 @@ namespace http {
 namespace wss {
 
 class WsRouter;
+class FileTransferPlugin;
 
 // 内部运行时状态（公开，供实现文件内的函数直接访问）
 struct WssReactorState {
@@ -62,6 +63,7 @@ public:
     bool isRunning() const { return running_.load(); }
 
     void setWsRouter(std::shared_ptr<WsRouter> router);
+    void setFileTransferPlugin(std::shared_ptr<FileTransferPlugin> ftp);
     void setWsIdleTimeout(int seconds);
     void setWsPingInterval(int seconds);
     void setTlsConfig(const TlsConfig& cfg);
@@ -82,6 +84,7 @@ private:
     utils::ThreadPool& threadPool_;
 
     std::shared_ptr<WsRouter> wsRouter_;
+    std::shared_ptr<FileTransferPlugin> ftPlugin_;
     std::atomic<bool> running_{false};
     std::thread reactorThread_;
 

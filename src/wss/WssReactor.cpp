@@ -4,6 +4,7 @@
 #include "HttpFramework/wss/WebSocketCodec.h"
 #include "HttpFramework/wss/OpenSslHelpers.h"
 #include "HttpFramework/wss/WsRouter.h"
+#include "HttpFramework/wss/FileTransferPlugin.h"
 #include "utils/ThreadPool.h"
 
 #include <arpa/inet.h>
@@ -464,6 +465,7 @@ WssReactor::WssReactor(uint16_t port, const std::string& certFile,
 WssReactor::~WssReactor() { stop(); }
 
 void WssReactor::setWsRouter(std::shared_ptr<WsRouter> router) { wsRouter_ = std::move(router); }
+void WssReactor::setFileTransferPlugin(std::shared_ptr<FileTransferPlugin> ftp) { ftPlugin_ = std::move(ftp); }
 void WssReactor::setWsIdleTimeout(int s) { st.idleTimeoutSec = s > 0 ? s : 120; }
 void WssReactor::setWsPingInterval(int s) { st.pingIntervalSec = s > 0 ? s : 40; }
 void WssReactor::setTlsConfig(const TlsConfig& cfg) { tlsConfig_ = cfg; }
@@ -567,6 +569,14 @@ void WssReactor::reactorLoop() {
                     if (diff.count() > st.idleTimeoutSec) toClose.push_back(kv.first);
                 }
                 for (int cfd : toClose) closeConnection(&st, cfd);
+
+                // 文件传输会话周期清理
+                if (ftPlugin_) {
+                    uint64_t nowSec = uint64_t(
+                        std::chrono::duration_cast<std::chrono::seconds>(
+                            std::chrono::system_clock::now().time_since_epoch()).count());
+                    ftPlugin_->cleanup(nowSec, 600, 1024);
+                }
 
                 if ((std::chrono::duration_cast<std::chrono::seconds>(now.time_since_epoch()).count() % 5) == 0) {
                     auto qs = threadPool_.getQueueSize();

@@ -11,6 +11,7 @@
 #include "HttpFramework/wss/WssTypes.h"
 #include "HttpFramework/wss/WssReactor.h"
 #include "HttpFramework/wss/WsRouter.h"
+#include "HttpFramework/wss/FileTransferPlugin.h"
 #endif
 
 #include <signal.h>
@@ -135,6 +136,16 @@ public:
         wsRouter_->setCloseHandler(path, std::move(h));
         return *this;
     }
+
+    // 启用文件分片传输插件（拦截 binary 帧，处理 FILE_START/QUERY/CHUNK）
+    App& enableFileTransfer(const std::string& uploadDir = "uploads") {
+        fileTransfer_ = std::make_shared<wss::FileTransferPlugin>(uploadDir);
+        useWs([this](http::WssConnection& conn, http::wss::WsMessage& msg,
+                      std::function<void()> next) {
+            (*fileTransfer_)(conn, msg, next);
+        });
+        return *this;
+    }
 #endif
 
     // ---- 启动 & 停止 ----
@@ -161,6 +172,7 @@ public:
             wssReactor_ = std::make_shared<wss::WssReactor>(
                 wssPort_, wssCertFile_, wssKeyFile_, *pool);
             if (wsRouter_) wssReactor_->setWsRouter(wsRouter_);
+            if (fileTransfer_) wssReactor_->setFileTransferPlugin(fileTransfer_);
             if (!wssReactor_->start()) {
                 throw std::runtime_error("Failed to start WSS on port " +
                                          std::to_string(wssPort_));
@@ -216,6 +228,7 @@ private:
     std::string wssKeyFile_;
     std::shared_ptr<wss::WsRouter>    wsRouter_;
     std::shared_ptr<wss::WssReactor>  wssReactor_;
+    std::shared_ptr<wss::FileTransferPlugin> fileTransfer_;
 #endif
 
     static inline App* s_current = nullptr;
