@@ -175,11 +175,11 @@ bool HttpServer::initializeServer() {
     subReactors_.reserve(subReactorCount_);
     for (size_t i = 0; i < subReactorCount_; ++i) {
         auto sr = std::make_unique<SubReactor>();
+        subReactors_.push_back(std::move(sr));
         if (!setupSubReactor(i)) {
             close(listenFd_);
             return false;
         }
-        subReactors_.push_back(std::move(sr));
     }
 
     std::cout << "Server initialized on port " << port_

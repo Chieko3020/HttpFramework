@@ -7,6 +7,7 @@ set(HTTP_SOURCES
     middleware/SessionMiddleware.cpp
     utils/MemoryPool.cpp
     utils/ThreadPool.cpp
+    utils/Logger.cpp
     session/Session.cpp
     session/SessionStorage.cpp
     session/SessionManager.cpp
