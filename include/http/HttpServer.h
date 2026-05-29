@@ -30,6 +30,8 @@ public:
     explicit HttpServer(int port,
                         size_t threadPoolSize = std::thread::hardware_concurrency(),
                         size_t subReactorCount = 0);
+    explicit HttpServer(int port, utils::ThreadPool& threadPool,
+                        size_t subReactorCount = 0);
     ~HttpServer();
 
     HttpServer(const HttpServer&) = delete;
@@ -84,8 +86,9 @@ private:
     std::unordered_map<int, int> fdToReactor_;
     std::mutex fdToReactorMutex_;
 
-    // 业务线程池
-    std::unique_ptr<utils::ThreadPool> threadPool_;
+    // 业务线程池（可为外部共享或自拥有）
+    utils::ThreadPool* threadPool_{nullptr};
+    bool ownsThreadPool_{false};
 
     // 路由
     std::shared_ptr<router::Router> router_;

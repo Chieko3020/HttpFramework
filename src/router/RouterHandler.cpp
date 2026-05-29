@@ -39,7 +39,7 @@ RouterHandler::RouterHandler() {
     setErrorHandler([](const std::exception& e, [[maybe_unused]] const http::HttpRequest& req, http::HttpResponse& res) {
         res.setStatus(http::HttpStatus::INTERNAL_SERVER_ERROR);
         res.setHtml("<html><body><h1>500 Internal Server Error</h1><p>An error occurred while processing your request.</p></body></html>");
-        std::cerr << "Error handling request: " << e.what() << std::endl;
+        std::cerr << "[ERROR][路由]：请求处理错误: " << e.what() << std::endl;
     });
 }
 

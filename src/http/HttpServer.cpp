@@ -18,11 +18,29 @@ HttpServer::HttpServer(int port, size_t threadPoolSize, size_t subReactorCount)
         subReactorCount = 1;
     subReactorCount_ = subReactorCount;
 
-    threadPool_ = std::make_unique<utils::ThreadPool>(threadPoolSize);
+    threadPool_ = new utils::ThreadPool(threadPoolSize);
+    ownsThreadPool_ = true;
 
-    std::cout << "HttpServer initialized on port " << port
-              << " with " << subReactorCount_ << " sub-reactor(s)"
-              << " and " << threadPoolSize << " worker threads" << std::endl;
+    std::cout << "[INFO][HTTP服务器]：初始化完成, port=" << port
+              << " 配置:" << subReactorCount_ << " 子Reactor"
+              << " and " << threadPoolSize << " 工作线程" << std::endl;
+}
+
+HttpServer::HttpServer(int port, utils::ThreadPool& threadPool, size_t subReactorCount)
+    : port_(port), running_(false), listenFd_(-1), mainEpollFd_(-1), useMemoryPool_(false) {
+
+    if (subReactorCount == 0)
+        subReactorCount = std::thread::hardware_concurrency();
+    if (subReactorCount < 1)
+        subReactorCount = 1;
+    subReactorCount_ = subReactorCount;
+
+    threadPool_ = &threadPool;
+    ownsThreadPool_ = false;
+
+    std::cout << "[INFO][HTTP服务器]：初始化完成, port=" << port
+              << " 配置:" << subReactorCount_ << " 子Reactor"
+              << " (共享线程池)" << std::endl;
 }
 
 HttpServer::~HttpServer() {
@@ -31,7 +49,7 @@ HttpServer::~HttpServer() {
 
 bool HttpServer::start() {
     if (running_.load()) {
-        std::cerr << "Server is already running" << std::endl;
+        std::cerr << "[WARN][HTTP服务器]：服务已在运行" << std::endl;
         return false;
     }
 
@@ -53,8 +71,8 @@ bool HttpServer::start() {
         mainReactorLoop();
     });
 
-    std::cout << "HttpServer started on port " << port_
-              << " (main + " << subReactorCount_ << " sub reactor(s))" << std::endl;
+    std::cout << "[INFO][HTTP服务器]：服务启动, port=" << port_
+              << " (主线程+" << subReactorCount_ << " 子Reactor)" << std::endl;
     return true;
 }
 
@@ -97,9 +115,11 @@ void HttpServer::stop() {
         }
     }
 
-    // 关闭线程池
-    if (threadPool_) {
+    // 关闭线程池（仅当自拥有时，共享池由 App 管理生命周期）
+    if (threadPool_ && ownsThreadPool_) {
         threadPool_->shutdown();
+        delete threadPool_;
+        threadPool_ = nullptr;
     }
 
     // 清理所有子 Reactor 的连接
@@ -118,32 +138,32 @@ void HttpServer::stop() {
         fdToReactor_.clear();
     }
 
-    std::cout << "HttpServer stopped" << std::endl;
+    std::cout << "[INFO][HTTP服务器]：服务已停止" << std::endl;
 }
 
 bool HttpServer::initializeServer() {
     // 创建监听 socket
     listenFd_ = socket(AF_INET, SOCK_STREAM, 0);
     if (listenFd_ < 0) {
-        std::cerr << "Failed to create socket: " << strerror(errno) << std::endl;
+        std::cerr << "[ERROR][HTTP服务器]：创建socket失败: " << strerror(errno) << std::endl;
         return false;
     }
 
     int opt = 1;
     if (setsockopt(listenFd_, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt)) < 0) {
-        std::cerr << "Failed to set SO_REUSEADDR: " << strerror(errno) << std::endl;
+        std::cerr << "[ERROR][HTTP服务器]：设置SO_REUSEADDR失败: " << strerror(errno) << std::endl;
         close(listenFd_);
         return false;
     }
 
     if (setsockopt(listenFd_, SOL_SOCKET, SO_REUSEPORT, &opt, sizeof(opt)) < 0) {
-        std::cerr << "Failed to set SO_REUSEPORT: " << strerror(errno) << std::endl;
+        std::cerr << "[ERROR][HTTP服务器]：设置SO_REUSEPORT失败: " << strerror(errno) << std::endl;
         close(listenFd_);
         return false;
     }
 
     if (!setNonBlocking(listenFd_)) {
-        std::cerr << "Failed to set non-blocking: " << strerror(errno) << std::endl;
+        std::cerr << "[ERROR][HTTP服务器]：设置非阻塞失败: " << strerror(errno) << std::endl;
         close(listenFd_);
         return false;
     }
@@ -154,13 +174,13 @@ bool HttpServer::initializeServer() {
     serverAddr_.sin_port = htons(port_);
 
     if (bind(listenFd_, (struct sockaddr*)&serverAddr_, sizeof(serverAddr_)) < 0) {
-        std::cerr << "Failed to bind to port " << port_ << ": " << strerror(errno) << std::endl;
+        std::cerr << "[ERROR][HTTP服务器]：绑定端口失败, port=" << port_ << ": " << strerror(errno) << std::endl;
         close(listenFd_);
         return false;
     }
 
     if (listen(listenFd_, SOMAXCONN) < 0) {
-        std::cerr << "Failed to listen: " << strerror(errno) << std::endl;
+        std::cerr << "[ERROR][HTTP服务器]：监听失败: " << strerror(errno) << std::endl;
         close(listenFd_);
         return false;
     }
@@ -175,22 +195,22 @@ bool HttpServer::initializeServer() {
     subReactors_.reserve(subReactorCount_);
     for (size_t i = 0; i < subReactorCount_; ++i) {
         auto sr = std::make_unique<SubReactor>();
+        subReactors_.push_back(std::move(sr));
         if (!setupSubReactor(i)) {
             close(listenFd_);
             return false;
         }
-        subReactors_.push_back(std::move(sr));
     }
 
-    std::cout << "Server initialized on port " << port_
-              << " with " << subReactorCount_ << " sub-reactor(s)" << std::endl;
+    std::cout << "[INFO][HTTP服务器]：初始化完成, port=" << port_
+              << " 配置:" << subReactorCount_ << " 子Reactor" << std::endl;
     return true;
 }
 
 bool HttpServer::setupMainEpoll() {
     mainEpollFd_ = epoll_create1(EPOLL_CLOEXEC);
     if (mainEpollFd_ < 0) {
-        std::cerr << "Failed to create main epoll: " << strerror(errno) << std::endl;
+        std::cerr << "[ERROR][HTTP服务器]：创建主epoll失败: " << strerror(errno) << std::endl;
         return false;
     }
 
@@ -199,7 +219,7 @@ bool HttpServer::setupMainEpoll() {
     event.data.fd = listenFd_;
 
     if (epoll_ctl(mainEpollFd_, EPOLL_CTL_ADD, listenFd_, &event) < 0) {
-        std::cerr << "Failed to add listen socket to main epoll: " << strerror(errno) << std::endl;
+        std::cerr << "[ERROR][HTTP服务器]：添加监听socket到主epoll失败: " << strerror(errno) << std::endl;
         close(mainEpollFd_);
         return false;
     }
@@ -211,7 +231,7 @@ bool HttpServer::setupSubReactor(size_t index) {
     auto& sr = subReactors_[index];
     sr->epollFd = epoll_create1(EPOLL_CLOEXEC);
     if (sr->epollFd < 0) {
-        std::cerr << "Failed to create epoll for sub-reactor " << index
+        std::cerr << "[ERROR][HTTP服务器]：创建子Reactor epoll失败, index=" << index
                   << ": " << strerror(errno) << std::endl;
         return false;
     }
@@ -230,7 +250,7 @@ void HttpServer::setRouter(std::shared_ptr<router::Router> router) {
 
 void HttpServer::enableMemoryPool(bool enable) {
     useMemoryPool_ = enable;
-    std::cout << "Memory pool " << (enable ? "enabled" : "disabled") << std::endl;
+    std::cout << "[INFO][HTTP服务器]：内存池已" << (enable ? "启用" : "禁用") << std::endl;
 }
 
 // ---- 主 Reactor（仅 accept + 分发） ----
@@ -239,14 +259,14 @@ void HttpServer::mainReactorLoop() {
     const int MAX_EVENTS = 128;
     struct epoll_event events[MAX_EVENTS];
 
-    std::cout << "Main reactor loop started (accept only)" << std::endl;
+    std::cout << "[DEBUG][HTTP服务器]：主Reactor循环启动 (仅accept)" << std::endl;
 
     while (running_.load()) {
         int nfds = epoll_wait(mainEpollFd_, events, MAX_EVENTS, 1000);
 
         if (nfds < 0) {
             if (errno == EINTR) continue;
-            std::cerr << "Main epoll_wait error: " << strerror(errno) << std::endl;
+            std::cerr << "[ERROR][HTTP服务器]：主epoll_wait错误: " << strerror(errno) << std::endl;
             break;
         }
 
@@ -257,7 +277,7 @@ void HttpServer::mainReactorLoop() {
         }
     }
 
-    std::cout << "Main reactor loop ended" << std::endl;
+    std::cout << "[DEBUG][HTTP服务器]：主Reactor循环结束" << std::endl;
 }
 
 void HttpServer::handleAccept() {
@@ -268,12 +288,12 @@ void HttpServer::handleAccept() {
         int clientFd = accept(listenFd_, (struct sockaddr*)&clientAddr, &clientAddrLen);
         if (clientFd < 0) {
             if (errno == EAGAIN || errno == EWOULDBLOCK) break;
-            std::cerr << "accept error: " << strerror(errno) << std::endl;
+            std::cerr << "[ERROR][HTTP服务器]：accept错误: " << strerror(errno) << std::endl;
             break;
         }
 
         if (!setNonBlocking(clientFd)) {
-            std::cerr << "Failed to set client socket non-blocking" << std::endl;
+            std::cerr << "[ERROR][HTTP服务器]：设置客户端socket非阻塞失败" << std::endl;
             close(clientFd);
             continue;
         }
@@ -288,7 +308,7 @@ void HttpServer::handleAccept() {
         event.data.fd = clientFd;
 
         if (epoll_ctl(sr->epollFd, EPOLL_CTL_ADD, clientFd, &event) < 0) {
-            std::cerr << "Failed to add client to sub-reactor " << idx
+            std::cerr << "[ERROR][HTTP服务器]：添加客户端到子Reactor失败, idx=" << idx
                       << " epoll: " << strerror(errno) << std::endl;
             close(clientFd);
             continue;
@@ -311,7 +331,7 @@ void HttpServer::handleAccept() {
 
         stats_.activeConnections.fetch_add(1);
 
-        std::cout << "New connection from " << inet_ntoa(clientAddr.sin_addr)
+        std::cout << "[INFO][HTTP服务器]：新连接, from=" << inet_ntoa(clientAddr.sin_addr)
                   << ":" << ntohs(clientAddr.sin_port) << " (fd: " << clientFd
                   << ", reactor: " << idx << ")" << std::endl;
     }
@@ -324,14 +344,14 @@ void HttpServer::subReactorLoop(int index) {
     struct epoll_event events[MAX_EVENTS];
     auto& sr = subReactors_[index];
 
-    std::cout << "Sub-reactor " << index << " loop started" << std::endl;
+    std::cout << "[DEBUG][HTTP服务器]：子Reactor" << index << " 循环启动" << std::endl;
 
     while (running_.load()) {
         int nfds = epoll_wait(sr->epollFd, events, MAX_EVENTS, 1000);
 
         if (nfds < 0) {
             if (errno == EINTR) continue;
-            std::cerr << "Sub-reactor " << index << " epoll_wait error: "
+            std::cerr << "[ERROR][HTTP服务器]：子Reactor" << index << " epoll_wait error: "
                       << strerror(errno) << std::endl;
             break;
         }
@@ -349,7 +369,7 @@ void HttpServer::subReactorLoop(int index) {
         }
     }
 
-    std::cout << "Sub-reactor " << index << " loop ended" << std::endl;
+    std::cout << "[DEBUG][HTTP服务器]：子Reactor" << index << " 循环结束" << std::endl;
 }
 
 void HttpServer::handleRead(int clientFd, int subReactorIndex) {
@@ -458,7 +478,7 @@ void HttpServer::closeConnection(int fd, int subReactorIndex) {
 
     stats_.activeConnections.fetch_sub(1);
 
-    std::cout << "Connection closed (fd: " << fd
+    std::cout << "[INFO][HTTP服务器]：连接关闭, fd=" << fd
               << ", reactor: " << subReactorIndex << ")" << std::endl;
 }
 
@@ -495,7 +515,7 @@ void HttpServer::processHttpRequest(int subReactorIndex, int clientFd,
         stats_.queuedTasks.fetch_sub(1);
 
     } catch (const std::exception& e) {
-        std::cerr << "Error processing request: " << e.what() << std::endl;
+        std::cerr << "[ERROR][HTTP服务器]：请求处理错误: " << e.what() << std::endl;
 
         auto& sr = subReactors_[subReactorIndex];
 
@@ -534,7 +554,7 @@ std::string HttpServer::readAllData(int fd) {
             break;
         } else {
             if (errno == EAGAIN || errno == EWOULDBLOCK) break;
-            std::cerr << "Read error: " << strerror(errno) << std::endl;
+            std::cerr << "[ERROR][HTTP服务器]：读取错误: " << strerror(errno) << std::endl;
             break;
         }
     }
@@ -569,7 +589,7 @@ bool HttpServer::writeAllDataFromOffset(int fd, const std::string& data,
                 if (bytesWritten) *bytesWritten = totalWritten - offset;
                 return false;
             }
-            std::cerr << "Write error: " << strerror(errno) << std::endl;
+            std::cerr << "[ERROR][HTTP服务器]：写入错误: " << strerror(errno) << std::endl;
             if (bytesWritten) *bytesWritten = totalWritten - offset;
             return false;
         }

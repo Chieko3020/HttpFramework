@@ -101,7 +101,7 @@ void SessionManager::startCleanupThread(std::chrono::seconds cleanupInterval) {
     cleanupThreadRunning_.store(true);
     cleanupThread_ = std::thread(&SessionManager::cleanupThreadFunction, this);
     
-    std::cout << "Session cleanup thread started with interval: " << cleanupInterval.count() << " seconds" << std::endl;
+    std::cout << "[INFO][会话]：清理线程已启动, 间隔=" << cleanupInterval.count() << "秒" << std::endl;
 }
 
 void SessionManager::stopCleanupThread() {
@@ -116,7 +116,7 @@ void SessionManager::stopCleanupThread() {
         cleanupThread_.join();
     }
     
-    std::cout << "Session cleanup thread stopped" << std::endl;
+    std::cout << "[INFO][会话]：清理线程已停止" << std::endl;
 }
 
 size_t SessionManager::getSessionCount() const {
@@ -148,7 +148,7 @@ void SessionManager::cleanupThreadFunction() {
         // 超时或被唤醒但需要继续运行
         if (cleanupThreadRunning_.load()) {
             cleanupExpiredSessions();
-            std::cout << "Session cleanup completed. Active sessions: " << getActiveSessionCount() << std::endl;
+            std::cout << "[DEBUG][会话]：清理完成, 活跃会话数=" << getActiveSessionCount() << std::endl;
         }
     }
 }

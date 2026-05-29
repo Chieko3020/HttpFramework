@@ -27,12 +27,12 @@ bool DbConnectionPool::initialize() {
                 availableConnections_.push(conn);
                 allConnections_.push_back(conn);
             } else {
-                std::cerr << "Failed to create connection " << i << std::endl;
+                std::cerr << "[ERROR][数据库]：创建连接失败, index=" << i << std::endl;
             }
         }
         
         if (availableConnections_.empty()) {
-            std::cerr << "Failed to create any database connections" << std::endl;
+            std::cerr << "[ERROR][数据库]：所有数据库连接创建失败" << std::endl;
             return false;
         }
         
@@ -40,12 +40,12 @@ bool DbConnectionPool::initialize() {
         healthCheckRunning_ = true;
         healthCheckThread_ = std::thread(&DbConnectionPool::healthCheckLoop, this);
         
-        std::cout << "Database connection pool initialized with " 
-                  << availableConnections_.size() << " connections" << std::endl;
+        std::cout << "[INFO][数据库]：连接池初始化完成, 连接数=" 
+                  << availableConnections_.size() << "" << std::endl;
         return true;
         
     } catch (const std::exception& e) {
-        std::cerr << "Failed to initialize connection pool: " << e.what() << std::endl;
+        std::cerr << "[ERROR][数据库]：连接池初始化失败: " << e.what() << std::endl;
         return false;
     }
 }
@@ -84,7 +84,7 @@ void DbConnectionPool::shutdown() {
     }
     
     allConnections_.clear();
-    std::cout << "Database connection pool shutdown" << std::endl;
+    std::cout << "[INFO][数据库]：连接池已关闭" << std::endl;
 }
 
 std::shared_ptr<DbConnection> DbConnectionPool::getConnection() {
@@ -153,11 +153,11 @@ void DbConnectionPool::healthCheck() {
     
     for (auto& conn : allConnections_) {
         if (!conn->isConnected()) {
-            std::cout << "Detected disconnected connection, attempting to reconnect..." << std::endl;
+            std::cout << "[INFO][数据库]：检测到断连，尝试重连..." << std::endl;
             if (conn->connect()) {
-                std::cout << "Connection re-established successfully" << std::endl;
+                std::cout << "[DEBUG][数据库]：重连成功" << std::endl;
             } else {
-                std::cerr << "Failed to re-establish connection" << std::endl;
+                std::cerr << "[ERROR][数据库]：重连失败" << std::endl;
             }
         }
     }

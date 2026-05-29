@@ -191,7 +191,7 @@ bool FileSessionStorage::writeSessionToFile(std::shared_ptr<Session> session, co
         file.close();
         return true;
     } catch (const std::exception& e) {
-        std::cerr << "Error writing session to file: " << e.what() << std::endl;
+        std::cerr << "[ERROR][会话]：会话写入文件失败: " << e.what() << std::endl;
         return false;
     }
 }
@@ -260,7 +260,7 @@ std::shared_ptr<Session> FileSessionStorage::readSessionFromFile(const std::stri
         
         return session;
     } catch (const std::exception& e) {
-        std::cerr << "Error reading session from file: " << e.what() << std::endl;
+        std::cerr << "[ERROR][会话]：从文件读取会话失败: " << e.what() << std::endl;
         return nullptr;
     }
 }

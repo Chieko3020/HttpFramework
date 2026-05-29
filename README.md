@@ -1,12 +1,14 @@
 # HttpFramework
 
-- Linux 下 C++ HTTP/1.1 服务框架，基于多 Reactor + 线程池架构（main Reactor accept + sub Reactor I/O + 线程池业务），实现 C++ 项目快速导入并搭载 HTTP 服务
+- Linux 下 C++ HTTP/1.1 + WSS (WebSocket + TLS 1.3) 服务框架，基于多 Reactor + 线程池架构（main Reactor accept + sub Reactor I/O + WSS 独立 Reactor + 共享线程池），实现 C++ 项目快速导入并搭载 HTTP 服务
 - epoll ET 模式 + 非阻塞 I/O，支持高并发
-- 路由系统：静态路由、动态路由（`:id`）、通配符路由、正则匹配
-- 中间件系统：链式处理，支持路径过滤，易于扩展
+- WSS 扩展：TLS 1.3 加密、WebSocket 全双工通信、0-RTT Early Data、会话复用、文件分片断点续传（可选启用）
+- 路由系统：HTTP 静态路由/动态路由（`:id`）/通配符 + WSS 路径路由
+- 中间件系统：HTTP 链式中间件 + WSS 消息中间件，支持路径过滤，统一 `next()` 流转
 - 会话管理：Session/Cookie 完整生命周期管理，自动过期清理，线程安全
 - MySQL 连接池：连接复用、健康检查、事务支持，简化数据库操作
 - 固定大小内存池：12KB 块，零动态分配，避免内存碎片，线程安全
+- 统一日志格式：`[INFO][模块]：消息` 四级日志（INFO/WARN/ERROR/DEBUG）
 - 开发环境：WSL Ubuntu 24.04 LTS & Visual Studio Code, CMake 3.28.3 & MySQL 8.0.42
 
 ## 快速开始
@@ -22,12 +24,20 @@ MySQL Connector/C++ 可选 — 未安装时数据库功能自动禁用，服务�
 ### 编译 & 运行
 
 ```bash
+# 基础编译（仅 HTTP）
 cmake -S . -B build && cmake --build build
 ./build/examples/hello_world     # 最简示例（无 DB 依赖，4 个路由）
 ./build/examples/full_demo       # 完整演示（路由/会话/DB/模板，MySQL 不可用时自动降级）
+
+# 启用 WSS 扩展（需要 OpenSSL 3.x）
+cmake -S . -B build -DENABLE_WSS=ON && cmake --build build
+# 生成自签名证书
+openssl req -x509 -newkey rsa:2048 -keyout certs/server_key.pem \
+    -out certs/server_cert.pem -days 365 -nodes -subj "/CN=localhost"
+./build/examples/wss_echo        # HTTP :8080 + WSS :9443 双协议服务
 ```
 
-访问 `http://localhost:8080`
+访问 `http://localhost:8080`，WebSocket 演示连接 `wss://localhost:9443`
 
 ### 作为库安装
 
@@ -36,6 +46,64 @@ cmake --install build --prefix /usr/local
 ```
 
 之后外部项目可通过 `find_package(HttpFramework REQUIRED)` 直接引用。
+
+## WSS 扩展（可选）
+
+启用 `ENABLE_WSS` 后，框架同时支持 HTTP REST API 和 WebSocket 实时通信，同一进程、同一端口空间、共享线程池。
+
+### WSS 最小示例
+
+```cpp
+#include "HttpFramework.h"
+int main() {
+    http::App app;
+
+    app.get("/", [](auto&, auto& res) {
+        res.setHtml("<h1>HTTP + WSS</h1>");
+    });
+
+    // 启用 WSS，注册 echo 处理器
+    app.enableWss(9443, "certs/server_cert.pem", "certs/server_key.pem")
+       .ws("/", [](http::WssConnection& conn, const http::wss::WsMessage& msg) {
+            conn.sendText("Echo: " + msg.text());
+       });
+
+    app.start(8080);  // HTTP :8080 + WSS :9443
+}
+```
+
+### WSS 连接生命周期
+
+```cpp
+app.onWsOpen("/chat", [](http::WssConnection& conn) {
+    std::cout << "client joined, id=" << conn.id() << std::endl;
+});
+app.onWsClose("/chat", [](http::WssConnection& conn, uint16_t code) {
+    std::cout << "client left, code=" << code << std::endl;
+});
+```
+
+### WSS 中间件
+
+```cpp
+// 全局鉴权 — 拦截所有 WSS 连接
+app.useWs([](http::WssConnection& conn, http::wss::WsMessage& msg,
+             std::function<void()> next) {
+    if (!conn.hasUserData("user_id")) { conn.close(4001); return; }
+    next();
+});
+```
+
+### WssConnection API
+
+| 方法 | 说明 |
+|------|------|
+| `sendText(text)` | 发送文本帧 |
+| `sendBinary(data)` | 发送二进制帧 |
+| `close(code)` | 关闭连接（默认 1000） |
+| `id()` | 连接唯一 ID |
+| `isOpen()` | 连接是否存活 |
+| `setUserData(k, v)` / `getUserData(k)` | 连接级键值存储 |
 
 ## 两种使用方式
 
@@ -163,7 +231,12 @@ app.get("/db/users", [&app](auto& req, auto& res) {
 | `enableSession(expire, cleanup)` | 1800s, 300s | 会话管理 + 后台自动清理 |
 | `enableMemoryPool()` | — | 12KB 固定块内存池 |
 | `enableDatabase(host, user, pass, db, port, max)` | port=3306, max=5 | MySQL 连接池（可选） |
-| `start(port, threads)` | threads=4 | 启动服务器并阻塞等待信号 |
+| `enableWss(port, cert, key)` | — | WSS 扩展：TLS 1.3 + WebSocket（需 `ENABLE_WSS=ON`） |
+| `ws(path, handler)` | — | 注册 WSS 消息处理器 |
+| `useWs(middleware)` | — | 注册 WSS 中间件（全局/路径） |
+| `onWsOpen(path, handler)` | — | WSS 连接建立回调 |
+| `onWsClose(path, handler)` | — | WSS 连接关闭回调 |
+| `start(port, threads)` | threads=4 | 启动服务器（HTTP + WSS）并阻塞等待信号 |
 
 需要完全控制时，通过 `app.router()`、`app.sessionManager()`、`app.dbPool()`、`app.stats()` 直接操作底层对象。
 
@@ -209,6 +282,7 @@ cmake --build build
 | 选项 | 默认值 | 说明 |
 |------|--------|------|
 | `BUILD_EXAMPLES` | ON | 编译示例程序 |
+| `ENABLE_WSS` | OFF | 启用 WSS (WebSocket + TLS 1.3) 扩展，需要 OpenSSL 3.x |
 
 ```bash
 # 仅构建库，不编译示例
@@ -219,15 +293,17 @@ cmake --build build
 ## 模块组成
 
 ```
-┌─────────────────────────────────────────────────────────┐
-│  应用层    │ 路由系统 │ 中间件系统 │ 会话管理 │ 数据库集成 │
-├─────────────────────────────────────────────────────────┤
-│  HTTP层    │ 请求解析 │ 响应构建 │ 协议处理 │ 状态管理   │
-├─────────────────────────────────────────────────────────┤
-│  网络层    │ 多Reactor │ epoll ET │ 非阻塞I/O │ 线程池  │
-├─────────────────────────────────────────────────────────┤
-│  系统层    │ Socket编程 │ 信号处理 │ 资源管理 │ 优雅关闭  │
-└─────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────────┐
+│  应用层    │ 路由系统 │ 中间件系统 │ 会话管理 │ 数据库集成 │ WSS  │
+├──────────────────────────────────────────────────────────────────┤
+│  HTTP层    │ 请求解析 │ 响应构建 │ 协议处理 │ 状态管理            │
+├──────────────────────────────────────────────────────────────────┤
+│  WSS层     │ TLS 1.3 握手 │ WebSocket 帧 │ 0-RTT │ 分片传输       │
+├──────────────────────────────────────────────────────────────────┤
+│  网络层    │ 多Reactor │ epoll ET │ 非阻塞I/O │ eventfd │ 线程池  │
+├──────────────────────────────────────────────────────────────────┤
+│  系统层    │ Socket编程 │ 信号处理 │ 资源管理 │ 优雅关闭           │
+└──────────────────────────────────────────────────────────────────┘
 ```
 
 ### 网络层
@@ -335,6 +411,35 @@ class MemoryPool {
     void deallocate(void* ptr);                 // O(1) 归还块
     size_t getAvailableBlocks() const;
     size_t getTotalBlocks() const;
+};
+```
+
+### WssReactor — WSS 事件循环（ENABLE_WSS）
+
+独立的 epoll 线程，管理 TLS 1.3 非阻塞握手、WebSocket 帧 I/O、心跳超时、eventfd 跨线程唤醒。与 HTTP 的 sub Reactor 并行运行，共享同一 ThreadPool。
+
+```cpp
+class WssReactor {
+    WssReactor(uint16_t port, const std::string& cert, const std::string& key,
+               utils::ThreadPool& pool);
+    bool start();
+    void stop();
+    void setWsRouter(std::shared_ptr<WsRouter> router);
+    void notifyOutbound();        // 从线程池唤醒 IO 线程
+};
+```
+
+### WsRouter — WSS 路由引擎（ENABLE_WSS）
+
+路径匹配 + 中间件链，支持 `:param` 动态路由和 `next()` 中间件流转。
+
+```cpp
+class WsRouter {
+    void addHandler(const std::string& path, WsHandler handler);
+    void addMiddleware(WsMiddleware mw);
+    void addMiddleware(const std::string& path, WsMiddleware mw);
+    void setOpenHandler(const std::string& path, WsOpenHandler h);
+    void setCloseHandler(const std::string& path, WsCloseHandler h);
 };
 ```
 
@@ -544,16 +649,19 @@ HttpFramework/
 │   └── HttpFrameworkConfig.cmake.in    # find_package 包配置模板
 ├── include/
 │   ├── HttpFramework.h                 # App 类
+│   ├── HttpFramework/wss/              # WSS 扩展：WssTypes / WebSocketCodec / WssConnection / WssReactor / WsRouter / OpenSslHelpers
 │   ├── http/                           # HttpServer / HttpRequest / HttpResponse / HttpContext
 │   ├── router/                         # Router / RouterHandler
 │   ├── session/                        # Session / SessionManager / SessionStorage
 │   ├── middleware/                     # SessionMiddleware
 │   └── utils/                          # MemoryPool / ThreadPool / TemplateLoader / db
 ├── src/                                # 源文件（与 include 一一对应）
+│   └── wss/                            # WSS 模块实现
 ├── templates/                          # HTML 模板（{{variable}} 变量替换）
 ├── examples/
 │   ├── hello_world.cpp                 # 最简示例
-│   └── full_demo.cpp                   # 全功能演示（路由/会话/DB/模板/统计）
+│   ├── full_demo.cpp                   # 全功能演示（路由/会话/DB/模板/统计）
+│   └── wss_echo.cpp                    # WSS 回显演示（需 ENABLE_WSS=ON）
 └── init.sql                            # 数据库初始化脚本
 ```
 
@@ -614,6 +722,14 @@ public:
     App& enableDatabase(const std::string& host, const std::string& user,
                         const std::string& password, const std::string& database,
                         int port = 3306, int maxConnections = 5);
+
+    // WSS 扩展（需 ENABLE_WSS=ON）
+    App& enableWss(uint16_t port, const std::string& certFile, const std::string& keyFile);
+    App& ws(const std::string& path, wss::WsHandler handler);
+    App& useWs(wss::WsMiddleware mw);
+    App& useWs(const std::string& path, wss::WsMiddleware mw);
+    App& onWsOpen(const std::string& path, wss::WsOpenHandler h);
+    App& onWsClose(const std::string& path, wss::WsCloseHandler h);
 
     // 生命周期
     void start(int port, int threads = 4);

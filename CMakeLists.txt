@@ -25,9 +25,17 @@ option(BUILD_EXAMPLES "Build example applications" ON)
 # 标准安装路径
 include(GNUInstallDirs)
 
+# WSS (WebSocket + TLS 1.3) 可选扩展模块
+option(ENABLE_WSS "Build with WebSocket + TLS 1.3 (WSS) support" OFF)
+
 # 查找依赖库
 find_package(Threads REQUIRED)
 find_package(Boost REQUIRED COMPONENTS system)
+
+if(ENABLE_WSS)
+    find_package(OpenSSL REQUIRED)
+    message(STATUS "WSS support enabled (requires OpenSSL ${OPENSSL_VERSION})")
+endif()
 
 # 查找MySQL Connector/C++
 find_path(MYSQLCPPCONN_INCLUDE_DIR mysql_connection.h

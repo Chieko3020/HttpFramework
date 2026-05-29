@@ -40,3 +40,21 @@ if(MYSQLCPPCONN_FOUND)
     target_link_libraries(http_framework ${MYSQLCPPCONN_LIBRARY})
     target_compile_definitions(http_framework PRIVATE ENABLE_DATABASE)
 endif()
+
+# ── WSS 扩展模块（可选）──
+if(ENABLE_WSS)
+    set(WSS_SOURCES
+        wss/WebSocketCodec.cpp
+        wss/OpenSslHelpers.cpp
+        wss/WssReactor.cpp
+        wss/WsRouter.cpp
+    )
+    target_sources(http_framework PRIVATE ${WSS_SOURCES})
+
+    target_link_libraries(http_framework
+        OpenSSL::SSL
+        OpenSSL::Crypto
+    )
+
+    target_compile_definitions(http_framework PUBLIC ENABLE_WSS)
+endif()

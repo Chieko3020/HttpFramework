@@ -24,15 +24,15 @@ void HttpMemoryPool::initializePool(size_t poolSize) {
         blocks_.push_back(std::move(block));
     }
     
-    std::cout << "MemoryPool initialized with " << poolSize 
-              << " blocks of " << BLOCK_SIZE << " bytes each" << std::endl;
+    std::cout << "[INFO][内存池]：初始化完成, 块数=" << poolSize 
+              << " 块, 每块 " << BLOCK_SIZE << " 字节" << std::endl;
 }
 
 MemoryBlock* HttpMemoryPool::allocate() {
     std::lock_guard<std::mutex> lock(mutex_);
     
     if (freeBlocks_.empty()) {
-        std::cerr << "MemoryPool: No free blocks available" << std::endl;
+        std::cerr << "[WARN][内存池]：无空闲块可用" << std::endl;
         return nullptr;
     }
     
@@ -50,7 +50,7 @@ void HttpMemoryPool::deallocate(MemoryBlock* block) {
     std::lock_guard<std::mutex> lock(mutex_);
     
     if (!block->isUsed) {
-        std::cerr << "MemoryPool: Attempting to deallocate unused block" << std::endl;
+        std::cerr << "[WARN][内存池]：尝试释放未使用的块" << std::endl;
         return;
     }
     
@@ -74,7 +74,7 @@ void HttpMemoryPool::reset() {
     }
     
     usedBlocks_ = 0;
-    std::cout << "MemoryPool reset: " << blocks_.size() << " blocks available" << std::endl;
+    std::cout << "[DEBUG][内存池]：已重置, 可用块数=" << blocks_.size() << " 块可用" << std::endl;
 }
 
 // PooledBuffer 实现

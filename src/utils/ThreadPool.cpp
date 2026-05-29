@@ -13,7 +13,7 @@ ThreadPool::ThreadPool(size_t threadCount)
         });
     }
     
-    std::cout << "ThreadPool initialized with " << threadCount << " threads" << std::endl;
+    std::cout << "[INFO][线程池]：初始化完成, 线程数=" << threadCount << "" << std::endl;
 }
 
 ThreadPool::~ThreadPool() {
@@ -49,7 +49,7 @@ void ThreadPool::workerFunction() {
             try {
                 task();
             } catch (const std::exception& e) {
-                std::cerr << "Task execution error: " << e.what() << std::endl;
+                std::cerr << "[ERROR][线程池]：任务执行异常: " << e.what() << std::endl;
             }
             
             // 任务完成，减少活跃任务计数
@@ -85,7 +85,7 @@ void ThreadPool::shutdown() {
     
     workers_.clear();
     
-    std::cout << "ThreadPool shutdown complete" << std::endl;
+    std::cout << "[INFO][线程池]：已关闭" << std::endl;
 }
 
 void ThreadPool::waitForAllTasks() {
