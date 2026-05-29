@@ -552,7 +552,7 @@ HttpFramework/
 ├── src/                                # 源文件（与 include 一一对应）
 ├── templates/                          # HTML 模板（{{variable}} 变量替换）
 ├── examples/
-│   ├── hello_world.cpp                 # 最简示例（40 行，无 DB 依赖）
+│   ├── hello_world.cpp                 # 最简示例
 │   └── full_demo.cpp                   # 全功能演示（路由/会话/DB/模板/统计）
 └── init.sql                            # 数据库初始化脚本
 ```
