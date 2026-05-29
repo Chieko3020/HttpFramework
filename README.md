@@ -11,6 +11,8 @@
 - 统一日志格式：`[INFO][模块]：消息` 四级日志（INFO/WARN/ERROR/DEBUG）
 - 开发环境：WSL Ubuntu 24.04 LTS & Visual Studio Code, CMake 3.28.3 & MySQL 8.0.42
 
+> WebSocket 模块来源于 [WebsocketServer](https://github.com/Chieko3020/WebsocketServer)
+
 ## 快速开始
 
 ### 依赖
