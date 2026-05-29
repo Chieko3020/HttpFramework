@@ -169,7 +169,7 @@ app.get("/db/users", [&app](auto& req, auto& res) {
 
 ### 方式二：底层 API
 
-直接使用 `HttpServer`、`Router`、`SessionManager`、`DbConnectionPool` 等底层类，自由组装。参考 `examples/full_demo.cpp`——它展示了手动管理信号处理、全局资源生命周期、端口检测等高级用法。
+直接使用 `HttpServer`、`Router`、`SessionManager`、`DbConnectionPool` 等底层类，自由组装。参考 `examples/full_demo.cpp`，展示了手动管理信号处理、全局资源生命周期、端口检测等用法。
 
 ## 外部项目集成
 
