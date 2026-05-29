@@ -6,6 +6,7 @@
 #include "middleware/SessionMiddleware.h"
 #include "utils/db/DbConnectionPool.h"
 #include "utils/ThreadPool.h"
+#include "utils/Logger.h"
 
 #ifdef ENABLE_WSS
 #include "HttpFramework/wss/WssTypes.h"
@@ -63,7 +64,7 @@ public:
 
     App& enableLogging() {
         router_->use([](const http::HttpRequest& req, http::HttpResponse&, std::function<void()> next) {
-            std::cout << "[INFO][HTTP]：" << req.getMethodString() << " " << req.getPath() << std::endl;
+            LOG_INFO("HTTP", req.getMethodString() << " " << req.getPath());
             next();
         });
         return *this;
@@ -90,7 +91,7 @@ public:
                         int port = 3306, int maxConnections = 5) {
         dbPool_ = std::make_shared<db::DbConnectionPool>(host, user, password, database, port, maxConnections);
         if (!dbPool_->initialize()) {
-            std::cerr << "[WARN][HTTP框架]：数据库连接池初始化失败, 数据库功能已禁用" << std::endl;
+            LOG_WARN("HTTP框架", "数据库连接池初始化失败, 数据库功能已禁用");
             dbPool_.reset();
         }
         return *this;
@@ -161,7 +162,7 @@ public:
         server_->setRouter(router_);
         if (useMemoryPool_) server_->enableMemoryPool(true);
 
-        std::cout << "[INFO][HTTP框架]：HTTP服务启动, http://localhost:" << port << std::endl;
+        LOG_INFO("HTTP框架", "HTTP服务启动, http://localhost:" << port);
 
         if (!server_->start()) {
             throw std::runtime_error("Failed to start server on port " + std::to_string(port));
@@ -177,7 +178,7 @@ public:
                 throw std::runtime_error("Failed to start WSS on port " +
                                          std::to_string(wssPort_));
             }
-            std::cout << "[INFO][HTTP框架]：WSS服务启动, wss://localhost:" << wssPort_ << std::endl;
+            LOG_INFO("HTTP框架", "WSS服务启动, wss://localhost:" << wssPort_);
         }
 #endif
 
@@ -235,7 +236,7 @@ private:
 
     static void onSignal(int sig) {
         if (s_current) {
-            std::cout << "\n[INFO][HTTP框架]：收到关闭信号 (signal=" << sig << ")" << std::endl;
+            LOG_INFO("HTTP框架", "收到关闭信号 (signal=" << sig << ")");
             s_current->stop();
         }
     }

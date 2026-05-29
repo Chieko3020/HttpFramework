@@ -9,7 +9,7 @@ int main() {
     http::App app;
 
     // ── HTTP 路由 ──
-    app.get("/", [](const auto& req, auto& res) {
+    app.get("/", [](const auto& /*req*/, auto& res) {
         res.setHtml(
             "<h1>HttpFramework + WSS</h1>"
             "<p>HTTP server running on port 8080</p>"

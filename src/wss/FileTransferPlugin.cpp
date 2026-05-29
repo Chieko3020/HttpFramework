@@ -58,8 +58,10 @@ std::string sanitizeFilename(const std::string& raw) {
     if (base.empty() || base=="." || base=="..") return "";
     std::string out; out.reserve(std::min<size_t>(base.size(), 200));
     for (unsigned char c : base) {
-        if (out.size()>=200) break; if (c<32) continue;
-        if (c=='/'||c=='\\'||c==':'||c=='<'||c=='>'||c=='"'||c=='|'||c=='*'||c=='?') continue;
+        if (out.size() >= 200) break;
+        if (c < 32) continue;
+        if (c == '/' || c == '\\' || c == ':' || c == '<' || c == '>' ||
+            c == '"' || c == '|' || c == '*' || c == '?') continue;
         out.push_back(char(c));
     }
     while (!out.empty()&&(out.back()==' '||out.back()=='.')) out.pop_back();
@@ -93,9 +95,15 @@ uint32_t computeFdCrc32(int fd) {
     if (::lseek(fd,0,SEEK_SET)<0) throw std::runtime_error("lseek failed");
     Crc32 crc; crc.reset();
     std::vector<uint8_t> buf(64*1024);
-    while (true) { ssize_t n=::read(fd,buf.data(),buf.size());
-        if (n<0){if(errno==EINTR)continue;throw std::runtime_error("read failed");}
-        if (n==0)break; crc.update(buf.data(),size_t(n)); }
+    while (true) {
+        ssize_t n = ::read(fd, buf.data(), buf.size());
+        if (n < 0) {
+            if (errno == EINTR) continue;
+            throw std::runtime_error("read failed");
+        }
+        if (n == 0) break;
+        crc.update(buf.data(), size_t(n));
+    }
     return crc.finish();
 }
 
@@ -211,7 +219,8 @@ void FileTransferPlugin::operator()(http::WssConnection& conn, WsMessage& msg,
                 conn.sendBinary(a); return;
             }
             off_t off=off_t(cid)*off_t(st.chunk_size);
-            ::pwrite(st.fd,data,dlen,off);
+            ssize_t pw = ::pwrite(st.fd, data, dlen, off);
+            (void)pw;  // 写入结果由 CRC32 校验保证
             if (!bitmapGet(st.bitmap,cid)) {
                 bitmapSet(&st.bitmap,cid); st.received_count++; st.last_update_ts=nowSec;
             }
