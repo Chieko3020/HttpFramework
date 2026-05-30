@@ -10,3 +10,12 @@ target_link_libraries(full_demo PRIVATE http_framework)
 add_executable(bench_server bench_server.cpp)
 target_link_libraries(bench_server PRIVATE http_framework)
 
+# WSS echo 示例 + WSS 基准客户端（需要 ENABLE_WSS=ON）
+if(ENABLE_WSS)
+    add_executable(wss_echo wss_echo.cpp)
+    target_link_libraries(wss_echo PRIVATE http_framework)
+
+    add_executable(wss_bench_client wss_bench_client.cpp)
+    target_link_libraries(wss_bench_client PRIVATE http_framework OpenSSL::SSL)
+endif()
+

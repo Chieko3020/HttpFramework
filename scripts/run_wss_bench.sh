@@ -7,8 +7,8 @@ set -eo pipefail
 
 BRANCH="${1:-unknown}"
 RESULT_DIR="${2:-results/$BRANCH}"
+PROJECT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 WSS_PORT=18990
-WSS_URI="wss://localhost:${WSS_PORT}/echo"
 
 mkdir -p "$RESULT_DIR"
 
@@ -44,48 +44,15 @@ bench_throughput() {
     local out
     out=$(record_header "d1_throughput_${label}" "WSS 消息吞吐量 (${label})")
 
-    echo "  [WSS] 发送 ${count} 条 ${label} 消息..."
+    local client="$PROJECT_DIR/build/examples/wss_bench_client"
+    if [ ! -x "$client" ]; then
+        echo "跳过: wss_bench_client 未编译 (需要 ENABLE_WSS=ON)" >> "$out"
+        return
+    fi
 
-    # 使用 wscat 管道批量发送
-    start_time=$(date +%s.%N) || start_time=0
-
-    tmpin=$(mktemp) || tmpin="/tmp/wss_bench_in_$$"
-    tmpout=$(mktemp) || tmpout="/tmp/wss_bench_out_$$"
-    for i in $(seq 1 "$count"); do
-        echo "msg-$i"
-    done > "$tmpin"
-
-    timeout 30 wscat -c "$WSS_URI" --no-color < "$tmpin" > "$tmpout" 2>/dev/null || true
-
-    end_time=$(date +%s.%N) || end_time=0
-    elapsed=$(echo "$end_time - $start_time" | bc 2>/dev/null || echo "0")
-    received=$(wc -l < "$tmpout" 2>/dev/null || echo "0")
-    [ -z "$received" ] && received=0
-
-    {
-        echo "消息大小: ${msg_size} bytes"
-        echo "发送: ${count}"
-        echo "收到: ${received}"
-        echo "总耗时: ${elapsed}s"
-        if [ "$(echo "$elapsed > 0" | bc 2>/dev/null)" = "1" ] && [ "$received" -gt 0 ]; then
-            echo "消息/秒: $(echo "scale=0; $received / $elapsed" | bc)"
-        fi
-    } >> "$out"
-
-    rm -f "$tmpin" "$tmpout"
+    echo "  [WSS] 发送 ${count} 条 ${label} 消息 (C++ 客户端)..."
+    "$client" localhost "$WSS_PORT" /echo "$count" "$msg_size" >> "$out" 2>&1
     echo "  ${label}: 完成"
-
-    {
-        echo "消息大小: ${msg_size} bytes"
-        echo "发送: ${sent}"
-        echo "收到: ${received}"
-        echo "总耗时: ${elapsed}s"
-        if [ "$(echo "$elapsed > 0" | bc)" = "1" ]; then
-            echo "消息/秒: $(echo "scale=0; $received / $elapsed" | bc)"
-        fi
-    } >> "$out"
-
-    echo "  ${label}: ${received}/${sent} 完成, ${elapsed}s"
 }
 
 # ── D2: TLS 握手速率 ───────────────────────────────────
