@@ -1,0 +1,12 @@
+=== a5_memory: 内存占用 (RSS) 在持续负载下 ===
+分支: main
+时间: 2026-05-30T16:10:44+08:00
+---
+初始 RSS:
+VmRSS:	   24728 kB
+负载中 RSS (30s):
+VmRSS:	   26732 kB
+负载中 RSS (60s):
+VmRSS:	   26908 kB
+负载后 RSS (空闲):
+VmRSS:	   26908 kB

@@ -1,0 +1,13 @@
+=== b2_mempool_on: 内存池 ON 时的吞吐量 ===
+分支: main
+时间: 2026-05-30T16:14:13+08:00
+---
+Running 30s test @ http://localhost:18980/bench/plaintext
+  4 threads and 500 connections
+  Thread Stats   Avg      Stdev     Max   +/- Stdev
+    Latency    46.54ms  211.51ms   1.79s    96.21%
+    Req/Sec    15.57k     2.11k   20.05k    81.48%
+  1867055 requests in 31.83s, 279.55MB read
+  Socket errors: connect 0, read 1868455, write 0, timeout 0
+Requests/sec:  58652.58
+Transfer/sec:      8.78MB

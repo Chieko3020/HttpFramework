@@ -68,15 +68,12 @@ void HttpContext::appendData(const char* data, size_t len) {
     }
 }
 
-const std::string& HttpContext::getData() const {
+std::string HttpContext::getData() const {
     if (useMemoryPool_) {
-        static std::string result;
         if (requestBuffer_) {
-            result = requestBuffer_->readString(requestBuffer_->getUsedSize());
-        } else {
-            result.clear();
+            return requestBuffer_->readString(requestBuffer_->getUsedSize());
         }
-        return result;
+        return {};
     } else {
         return buffer_;
     }
@@ -120,15 +117,12 @@ void HttpContext::setResponseData(const char* data, size_t len) {
     }
 }
 
-const std::string& HttpContext::getResponseData() const {
+std::string HttpContext::getResponseData() const {
     if (useMemoryPool_) {
-        static std::string result;
         if (responseBuffer_) {
-            result = responseBuffer_->readString(responseBuffer_->getUsedSize());
-        } else {
-            result.clear();
+            return responseBuffer_->readString(responseBuffer_->getUsedSize());
         }
-        return result;
+        return {};
     } else {
         return responseData_;
     }

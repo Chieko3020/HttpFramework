@@ -441,7 +441,7 @@ void HttpServer::handleWrite(int clientFd, int subReactorIndex) {
         return;
     }
 
-    const std::string& responseData = ctxPtr->getResponseData();
+    std::string responseData = ctxPtr->getResponseData();
     if (!responseData.empty()) {
         size_t offset = ctxPtr->getWriteOffset();
         size_t bytesWritten = 0;
