@@ -1,0 +1,13 @@
+=== a2_json: JSON 响应吞吐量 ===
+分支: feature/WebSocket
+时间: 2026-05-30T16:44:00+08:00
+---
+Running 30s test @ http://localhost:18980/bench/json
+  4 threads and 100 connections
+  Thread Stats   Avg      Stdev     Max   +/- Stdev
+    Latency    42.46ms  211.96ms   1.78s    96.18%
+    Req/Sec     8.70k   653.85     9.94k    86.46%
+  1045379 requests in 31.85s, 176.46MB read
+  Socket errors: connect 0, read 1045782, write 0, timeout 0
+Requests/sec:  32819.74
+Transfer/sec:      5.54MB

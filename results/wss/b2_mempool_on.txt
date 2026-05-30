@@ -1,0 +1,13 @@
+=== b2_mempool_on: 内存池 ON 时的吞吐量 ===
+分支: feature/WebSocket
+时间: 2026-05-30T16:50:07+08:00
+---
+Running 30s test @ http://localhost:18980/bench/plaintext
+  4 threads and 500 connections
+  Thread Stats   Avg      Stdev     Max   +/- Stdev
+    Latency    51.98ms  223.66ms   1.77s    95.72%
+    Req/Sec    15.20k     1.93k   19.18k    79.07%
+  1823186 requests in 31.83s, 272.98MB read
+  Socket errors: connect 0, read 1824405, write 0, timeout 0
+Requests/sec:  57276.17
+Transfer/sec:      8.58MB
