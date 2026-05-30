@@ -1,18 +1,18 @@
 === a3_latency: 延迟分布 (带详细分位) ===
-分支: wss
-时间: 2026-05-30T16:29:31+08:00
+分支: feature/WebSocket
+时间: 2026-05-30T16:44:36+08:00
 ---
 Running 30s test @ http://localhost:18980/bench/json
   4 threads and 100 connections
   Thread Stats   Avg      Stdev     Max   +/- Stdev
-    Latency    45.39ms  223.91ms   1.85s    96.07%
-    Req/Sec     8.77k   740.57    10.30k    84.30%
+    Latency    41.73ms  208.91ms   1.76s    96.21%
+    Req/Sec     8.71k   653.73    10.21k    87.29%
   Latency Distribution
      50%    2.56ms
-     75%    4.80ms
-     90%    8.05ms
-     99%    1.44s 
-  1053243 requests in 31.93s, 177.79MB read
-  Socket errors: connect 0, read 1053633, write 0, timeout 0
-Requests/sec:  32981.07
-Transfer/sec:      5.57MB
+     75%    4.79ms
+     90%    7.98ms
+     99%    1.36s 
+  1045018 requests in 31.78s, 176.40MB read
+  Socket errors: connect 0, read 1045419, write 0, timeout 0
+Requests/sec:  32881.23
+Transfer/sec:      5.55MB

@@ -1,13 +1,13 @@
 === a1_plaintext_hc: 纯文本吞吐量 - 1000 并发 ===
-分支: wss
-时间: 2026-05-30T16:28:19+08:00
+分支: feature/WebSocket
+时间: 2026-05-30T16:43:24+08:00
 ---
 Running 30s test @ http://localhost:18980/bench/plaintext
   4 threads and 1000 connections
   Thread Stats   Avg      Stdev     Max   +/- Stdev
-    Latency    69.06ms  232.41ms   1.89s    95.88%
-    Req/Sec    11.18k     2.96k   20.84k    72.50%
-  1337603 requests in 31.88s, 200.28MB read
-  Socket errors: connect 0, read 1337720, write 0, timeout 0
-Requests/sec:  41957.80
-Transfer/sec:      6.28MB
+    Latency    63.32ms  215.38ms   1.80s    96.01%
+    Req/Sec    11.75k     2.92k   20.35k    74.67%
+  1406473 requests in 31.78s, 210.59MB read
+  Socket errors: connect 0, read 1406614, write 0, timeout 0
+Requests/sec:  44252.92
+Transfer/sec:      6.63MB

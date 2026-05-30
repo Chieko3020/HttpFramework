@@ -1,9 +1,9 @@
 #!/bin/bash
 # run_wss_bench.sh — WSS 性能基准测试
 # 用法: ./scripts/run_wss_bench.sh <branch_label> [results_dir]
-# 依赖: npx wscat, openssl, curl
+# 依赖: wscat, python3-websockets, openssl, curl
 
-set -euo pipefail
+set -eo pipefail
 
 BRANCH="${1:-unknown}"
 RESULT_DIR="${2:-results/$BRANCH}"
@@ -14,7 +14,7 @@ mkdir -p "$RESULT_DIR"
 
 # 检查 npx/wscat 是否可用
 check_wscat() {
-    if npx --yes wscat --version &>/dev/null; then
+    if wscat --version &>/dev/null; then
         return 0
     fi
     echo "  [错误] npx wscat 不可用"
@@ -44,35 +44,36 @@ bench_throughput() {
     local out
     out=$(record_header "d1_throughput_${label}" "WSS 消息吞吐量 (${label})")
 
-    if ! check_wscat; then
-        echo "跳过: npx wscat 不可用" >> "$out"
-        return
-    fi
-
-    # 生成指定大小的消息
-    local payload
-    payload=$(python3 -c "print('x'*$msg_size)" 2>/dev/null || printf 'x%.0s' $(seq 1 "$msg_size"))
-
     echo "  [WSS] 发送 ${count} 条 ${label} 消息..."
-    local start_time end_time elapsed
-    start_time=$(date +%s.%N)
 
-    local sent=0
-    local received=0
+    # 使用 wscat 管道批量发送
+    start_time=$(date +%s.%N) || start_time=0
+
+    tmpin=$(mktemp) || tmpin="/tmp/wss_bench_in_$$"
+    tmpout=$(mktemp) || tmpout="/tmp/wss_bench_out_$$"
     for i in $(seq 1 "$count"); do
-        # 每条消息单独连接发送
-        if result=$(echo "$payload" | timeout 10 npx --yes wscat -c "$WSS_URI" --no-color 2>&1); then
-            received=$((received + 1))
-        fi
-        sent=$((sent + 1))
+        echo "msg-$i"
+    done > "$tmpin"
 
-        if [ $((sent % 10)) -eq 0 ]; then
-            echo "    ${label}: ${sent}/${count}"
-        fi
-    done
+    timeout 30 wscat -c "$WSS_URI" --no-color < "$tmpin" > "$tmpout" 2>/dev/null || true
 
-    end_time=$(date +%s.%N)
+    end_time=$(date +%s.%N) || end_time=0
     elapsed=$(echo "$end_time - $start_time" | bc 2>/dev/null || echo "0")
+    received=$(wc -l < "$tmpout" 2>/dev/null || echo "0")
+    [ -z "$received" ] && received=0
+
+    {
+        echo "消息大小: ${msg_size} bytes"
+        echo "发送: ${count}"
+        echo "收到: ${received}"
+        echo "总耗时: ${elapsed}s"
+        if [ "$(echo "$elapsed > 0" | bc 2>/dev/null)" = "1" ] && [ "$received" -gt 0 ]; then
+            echo "消息/秒: $(echo "scale=0; $received / $elapsed" | bc)"
+        fi
+    } >> "$out"
+
+    rm -f "$tmpin" "$tmpout"
+    echo "  ${label}: 完成"
 
     {
         echo "消息大小: ${msg_size} bytes"
@@ -187,7 +188,7 @@ bench_filetransfer() {
     out=$(record_header "d5_filetransfer_${size_kb}kb" "文件传输速率 (${size_kb}KB)")
 
     if ! check_wscat; then
-        echo "跳过: npx wscat 不可用" >> "$out"
+        echo "跳过: wscat 不可用" >> "$out"
         return
     fi
 
@@ -201,7 +202,7 @@ bench_filetransfer() {
     start_time=$(date +%s.%N)
 
     # wscat 发送文件
-    if timeout 30 npx --yes wscat -c "$WSS_URI" --no-color < "$tmpfile" > /tmp/wss_resp.bin 2>/dev/null; then
+    if timeout 30 wscat -c "$WSS_URI" --no-color < "$tmpfile" > /tmp/wss_resp.bin 2>/dev/null; then
         end_time=$(date +%s.%N)
         elapsed=$(echo "$end_time - $start_time" | bc)
 
