@@ -1,0 +1,54 @@
+=== b1_threads: 不同线程数的吞吐量变化 ===
+分支: wss
+时间: 2026-05-30T16:32:42+08:00
+---
+  --- 线程: 1 ---
+Running 15s test @ http://localhost:18980/bench/plaintext
+  2 threads and 100 connections
+  Thread Stats   Avg      Stdev     Max   +/- Stdev
+    Latency    83.19ms  302.34ms   1.82s    92.96%
+    Req/Sec    20.90k     2.22k   25.07k    93.05%
+  628567 requests in 16.83s, 94.11MB read
+  Socket errors: connect 0, read 628996, write 0, timeout 0
+Requests/sec:  37349.59
+Transfer/sec:      5.59MB
+  --- 线程: 2 ---
+Running 15s test @ http://localhost:18980/bench/plaintext
+  2 threads and 100 connections
+  Thread Stats   Avg      Stdev     Max   +/- Stdev
+    Latency     2.02ms  535.33us   9.01ms   79.88%
+    Req/Sec    22.28k     1.00k   25.39k    78.00%
+  665175 requests in 15.00s, 99.59MB read
+  Socket errors: connect 0, read 665528, write 0, timeout 0
+Requests/sec:  44343.16
+Transfer/sec:      6.64MB
+  --- 线程: 4 ---
+Running 15s test @ http://localhost:18980/bench/plaintext
+  2 threads and 100 connections
+  Thread Stats   Avg      Stdev     Max   +/- Stdev
+    Latency    78.05ms  295.36ms   1.86s    93.50%
+    Req/Sec    18.06k     1.80k   21.20k    92.05%
+  543428 requests in 16.87s, 81.37MB read
+  Socket errors: connect 0, read 543584, write 0, timeout 0
+Requests/sec:  32210.87
+Transfer/sec:      4.82MB
+  --- 线程: 8 ---
+Running 15s test @ http://localhost:18980/bench/plaintext
+  2 threads and 100 connections
+  Thread Stats   Avg      Stdev     Max   +/- Stdev
+    Latency     2.56ms    2.25ms  18.49ms   74.99%
+    Req/Sec    20.82k     0.91k   22.47k    67.33%
+  621375 requests in 15.00s, 93.04MB read
+  Socket errors: connect 0, read 621557, write 0, timeout 0
+Requests/sec:  41423.40
+Transfer/sec:      6.20MB
+  --- 线程: 16 ---
+Running 15s test @ http://localhost:18980/bench/plaintext
+  2 threads and 100 connections
+  Thread Stats   Avg      Stdev     Max   +/- Stdev
+    Latency    80.20ms  294.92ms   1.79s    93.08%
+    Req/Sec    21.75k     2.53k   26.88k    88.08%
+  655247 requests in 16.83s, 98.11MB read
+  Socket errors: connect 0, read 655620, write 0, timeout 0
+Requests/sec:  38941.54
+Transfer/sec:      5.83MB

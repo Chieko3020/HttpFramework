@@ -1,0 +1,44 @@
+=== b3_routes: 不同路由数量的吞吐量退化 ===
+分支: wss
+时间: 2026-05-30T16:35:34+08:00
+---
+  --- 路由数: 10 ---
+Running 15s test @ http://localhost:18980/bench/plaintext
+  2 threads and 100 connections
+  Thread Stats   Avg      Stdev     Max   +/- Stdev
+    Latency    69.66ms  272.34ms   1.79s    94.01%
+    Req/Sec    12.94k     2.57k   18.23k    73.18%
+  389737 requests in 16.82s, 58.35MB read
+  Socket errors: connect 0, read 389873, write 0, timeout 0
+Requests/sec:  23171.02
+Transfer/sec:      3.47MB
+  --- 路由数: 100 ---
+Running 15s test @ http://localhost:18980/bench/plaintext
+  2 threads and 100 connections
+  Thread Stats   Avg      Stdev     Max   +/- Stdev
+    Latency     3.19ms    2.79ms  26.90ms   76.18%
+    Req/Sec    16.08k     2.39k   21.06k    66.67%
+  480294 requests in 15.01s, 71.91MB read
+  Socket errors: connect 0, read 480387, write 0, timeout 0
+Requests/sec:  31991.75
+Transfer/sec:      4.79MB
+  --- 路由数: 500 ---
+Running 15s test @ http://localhost:18980/bench/plaintext
+  2 threads and 100 connections
+  Thread Stats   Avg      Stdev     Max   +/- Stdev
+    Latency    79.11ms  290.10ms   1.78s    93.18%
+    Req/Sec    17.29k     1.95k   20.20k    87.75%
+  522238 requests in 16.84s, 78.19MB read
+  Socket errors: connect 0, read 522370, write 0, timeout 0
+Requests/sec:  31019.63
+Transfer/sec:      4.64MB
+  --- 路由数: 1000 ---
+Running 15s test @ http://localhost:18980/bench/plaintext
+  2 threads and 100 connections
+  Thread Stats   Avg      Stdev     Max   +/- Stdev
+    Latency     2.97ms    2.60ms  32.03ms   76.65%
+    Req/Sec    17.47k     1.69k   21.25k    77.67%
+  521295 requests in 15.00s, 78.05MB read
+  Socket errors: connect 0, read 521409, write 0, timeout 0
+Requests/sec:  34750.62
+Transfer/sec:      5.20MB

@@ -1,0 +1,13 @@
+=== c2_session_off: Session OFF 时的吞吐量 ===
+分支: wss
+时间: 2026-05-30T16:38:54+08:00
+---
+Running 30s test @ http://localhost:18980/bench/plaintext
+  4 threads and 100 connections
+  Thread Stats   Avg      Stdev     Max   +/- Stdev
+    Latency    43.81ms  215.05ms   1.78s    96.08%
+    Req/Sec     8.49k     0.88k   10.42k    78.41%
+  1020269 requests in 31.84s, 152.76MB read
+  Socket errors: connect 0, read 1020635, write 0, timeout 0
+Requests/sec:  32042.82
+Transfer/sec:      4.80MB

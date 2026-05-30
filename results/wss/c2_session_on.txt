@@ -1,0 +1,13 @@
+=== c2_session_on: Session ON 时的吞吐量 ===
+分支: wss
+时间: 2026-05-30T16:39:30+08:00
+---
+Running 30s test @ http://localhost:18980/bench/session
+  4 threads and 100 connections
+  Thread Stats   Avg      Stdev     Max   +/- Stdev
+    Latency     2.06ms    1.44ms  49.51ms   94.07%
+    Req/Sec    11.46k     0.87k   13.18k    89.41%
+  506162 requests in 31.79s, 132.75MB read
+  Socket errors: connect 0, read 506879, write 4739438, timeout 0
+Requests/sec:  15922.66
+Transfer/sec:      4.18MB
