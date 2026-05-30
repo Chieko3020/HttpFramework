@@ -480,7 +480,7 @@ void HttpServer::mainReactorLoop() {
         int n = epoll_wait(mainEpollFd_, events_, MAX_EVENTS, 1000);
         for (int i = 0; i < n; ++i) {
             if (events_[i].data.fd == listenFd_ && (events_[i].events & EPOLLIN))
-                handleAccept();                 // accept → 轮询分发到 sub reactor
+                handleAccept();                 // accept  轮询分发到 sub reactor
         }
     }
 }
@@ -914,9 +914,9 @@ public:
 
 ## 故障排除
 
-**编译错误**：确保依赖完整 → `apt install build-essential cmake libboost-all-dev libmysqlcppconn-dev libssl-dev`，清理重编 → `rm -rf build && cmake -S . -B build && cmake --build build`
+**编译错误**：确保依赖完整  `apt install build-essential cmake libboost-all-dev libmysqlcppconn-dev libssl-dev`，清理重编  `rm -rf build && cmake -S . -B build && cmake --build build`
 
-**WSS 编译失败**：确认 OpenSSL 已安装 → `dpkg -l libssl-dev`，使用 `-DENABLE_WSS=OFF` 可跳过 WSS 模块
+**WSS 编译失败**：确认 OpenSSL 已安装  `dpkg -l libssl-dev`，使用 `-DENABLE_WSS=OFF` 可跳过 WSS 模块
 
 **数据库连接失败**：MySQL 不可用时 `enableDatabase()` 自动降级，检查 `sudo systemctl status mysql`，或直接不调用 `enableDatabase()`
 
