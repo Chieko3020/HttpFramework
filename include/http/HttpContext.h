@@ -78,8 +78,8 @@ private:
     std::unique_ptr<utils::PooledBuffer> requestBuffer_;
     std::unique_ptr<utils::PooledBuffer> responseBuffer_;
     
-    // 全局内存池引用
-    utils::HttpMemoryPool& memoryPool_;
+    // 全局内存池指针 (延迟初始化，避免未使用时分配 60MB)
+    utils::HttpMemoryPool* memoryPool_;
     
     // 写入进度跟踪
     size_t writeOffset_;

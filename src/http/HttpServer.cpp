@@ -10,7 +10,8 @@
 namespace http {
 
 HttpServer::HttpServer(int port, size_t threadPoolSize, size_t subReactorCount)
-    : port_(port), running_(false), listenFd_(-1), mainEpollFd_(-1), useMemoryPool_(false) {
+    : port_(port), running_(false), listenFd_(-1), mainEpollFd_(-1),
+      threadPoolSize_(threadPoolSize), useMemoryPool_(false) {
 
     if (subReactorCount == 0)
         subReactorCount = std::thread::hardware_concurrency();
@@ -37,6 +38,7 @@ HttpServer::HttpServer(int port, utils::ThreadPool& threadPool, size_t subReacto
 
     threadPool_ = &threadPool;
     ownsThreadPool_ = false;
+    threadPoolSize_ = threadPool.getThreadCount();
 
     std::cout << "[INFO][HTTP服务器]：初始化完成, port=" << port
               << " 配置:" << subReactorCount_ << " 子Reactor"
@@ -51,6 +53,12 @@ bool HttpServer::start() {
     if (running_.load()) {
         std::cerr << "[WARN][HTTP服务器]：服务已在运行" << std::endl;
         return false;
+    }
+
+    // 如果线程池已被 shutdown（例如 stop() 后重启），重新创建（仅自拥有池）
+    if (threadPool_ && !threadPool_->isRunning() && ownsThreadPool_) {
+        delete threadPool_;
+        threadPool_ = new utils::ThreadPool(threadPoolSize_);
     }
 
     if (!initializeServer()) {

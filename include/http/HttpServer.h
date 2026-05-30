@@ -89,6 +89,7 @@ private:
     // 业务线程池（可为外部共享或自拥有）
     utils::ThreadPool* threadPool_{nullptr};
     bool ownsThreadPool_{false};
+    size_t threadPoolSize_{4};  // 保存线程数，用于 stop() 后重启时重建
 
     // 路由
     std::shared_ptr<router::Router> router_;

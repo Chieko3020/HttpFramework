@@ -65,9 +65,17 @@ for BRANCH in "${BRANCHES[@]}"; do
 
     BUILD_DIR="build"
     echo "[构建] cmake -S . -B $BUILD_DIR $CMAKE_OPTS"
-    cmake -S . -B "$BUILD_DIR" $CMAKE_OPTS > "$BUILD_DIR/build.log" 2>&1
+    if ! cmake -S . -B "$BUILD_DIR" $CMAKE_OPTS > "$BUILD_DIR/build.log" 2>&1; then
+        echo "[构建] ❌ CMake 配置失败!"
+        tail -20 "$BUILD_DIR/build.log"
+        exit 1
+    fi
     echo "[构建] cmake --build $BUILD_DIR -j 2"
-    cmake --build "$BUILD_DIR" -j 2 >> "$BUILD_DIR/build.log" 2>&1
+    if ! cmake --build "$BUILD_DIR" -j 2 >> "$BUILD_DIR/build.log" 2>&1; then
+        echo "[构建] ❌ 编译失败!"
+        tail -20 "$BUILD_DIR/build.log"
+        exit 1
+    fi
 
     if ! grep -i warning "$BUILD_DIR/build.log" | grep -v "WARN\|CMAKE" > /dev/null 2>&1; then
         echo "[构建] ✅ 编译完成, 0 警告"

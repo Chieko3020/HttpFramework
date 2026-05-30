@@ -3,9 +3,9 @@
 
 namespace http {
 
-HttpContext::HttpContext() 
-    : clientFd_(-1), keepAlive_(false), useMemoryPool_(false), 
-      memoryPool_(utils::GlobalMemoryPool::getInstance()), writeOffset_(0) {
+HttpContext::HttpContext()
+    : clientFd_(-1), keepAlive_(false), useMemoryPool_(false),
+      memoryPool_(nullptr), writeOffset_(0) {
 }
 
 void HttpContext::setUserData(const std::string& key, const std::string& value) {
@@ -49,7 +49,7 @@ void HttpContext::clear() {
 void HttpContext::appendData(const std::string& data) {
     if (useMemoryPool_) {
         if (!requestBuffer_) {
-            requestBuffer_ = std::make_unique<utils::PooledBuffer>(&memoryPool_);
+            requestBuffer_ = std::make_unique<utils::PooledBuffer>(memoryPool_);
         }
         requestBuffer_->write(data);
     } else {
@@ -60,7 +60,7 @@ void HttpContext::appendData(const std::string& data) {
 void HttpContext::appendData(const char* data, size_t len) {
     if (useMemoryPool_) {
         if (!requestBuffer_) {
-            requestBuffer_ = std::make_unique<utils::PooledBuffer>(&memoryPool_);
+            requestBuffer_ = std::make_unique<utils::PooledBuffer>(memoryPool_);
         }
         requestBuffer_->write(data, len);
     } else {
@@ -93,7 +93,7 @@ void HttpContext::setResponseData(const std::string& data) {
     if (useMemoryPool_) {
         // 强制使用内存池，不再回退到std::string
         if (!responseBuffer_) {
-            responseBuffer_ = std::make_unique<utils::PooledBuffer>(&memoryPool_);
+            responseBuffer_ = std::make_unique<utils::PooledBuffer>(memoryPool_);
         }
         responseBuffer_->clear();
         responseBuffer_->write(data);
@@ -107,7 +107,7 @@ void HttpContext::setResponseData(const char* data, size_t len) {
     if (useMemoryPool_) {
         // 强制使用内存池，不再回退到std::string
         if (!responseBuffer_) {
-            responseBuffer_ = std::make_unique<utils::PooledBuffer>(&memoryPool_);
+            responseBuffer_ = std::make_unique<utils::PooledBuffer>(memoryPool_);
         }
         responseBuffer_->clear();
         responseBuffer_->write(data, len);
@@ -136,10 +136,14 @@ void HttpContext::enableMemoryPool(bool enable) {
     useMemoryPool_ = enable;
     
     if (enable) {
+        // 延迟初始化全局内存池 (避免未使用时分配 60MB)
+        if (!memoryPool_) {
+            memoryPool_ = &utils::GlobalMemoryPool::getInstance();
+        }
         // 从传统模式切换到内存池模式
         if (!buffer_.empty()) {
             if (!requestBuffer_) {
-                requestBuffer_ = std::make_unique<utils::PooledBuffer>(&memoryPool_);
+                requestBuffer_ = std::make_unique<utils::PooledBuffer>(memoryPool_);
             }
             requestBuffer_->write(buffer_);
             buffer_.clear();
@@ -147,7 +151,7 @@ void HttpContext::enableMemoryPool(bool enable) {
         
         if (!responseData_.empty()) {
             if (!responseBuffer_) {
-                responseBuffer_ = std::make_unique<utils::PooledBuffer>(&memoryPool_);
+                responseBuffer_ = std::make_unique<utils::PooledBuffer>(memoryPool_);
             }
             responseBuffer_->write(responseData_);
             responseData_.clear();
@@ -175,9 +179,9 @@ void HttpContext::printMemoryPoolStats() const {
         responseBuffer_->getUsedSize() : responseData_.size()) << " bytes" << std::endl;
     
     if (useMemoryPool_) {
-        std::cout << "  Pool Total Blocks: " << memoryPool_.getTotalBlocks() << std::endl;
-        std::cout << "  Pool Used Blocks: " << memoryPool_.getUsedBlocks() << std::endl;
-        std::cout << "  Pool Available Blocks: " << memoryPool_.getAvailableBlocks() << std::endl;
+        std::cout << "  Pool Total Blocks: " << memoryPool_->getTotalBlocks() << std::endl;
+        std::cout << "  Pool Used Blocks: " << memoryPool_->getUsedBlocks() << std::endl;
+        std::cout << "  Pool Available Blocks: " << memoryPool_->getAvailableBlocks() << std::endl;
     }
 }
 
