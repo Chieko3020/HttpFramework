@@ -663,11 +663,93 @@ HttpFramework/
 ├── examples/
 │   ├── hello_world.cpp                 # 最简示例
 │   ├── full_demo.cpp                   # 全功能演示（路由/会话/DB/模板/统计）
+│   ├── bench_server.cpp                # 性能基准测试服务器
 │   └── wss_echo.cpp                    # WSS 回显演示（需 ENABLE_WSS=ON）
+├── tests/                              # 单元测试 (12 文件, 82 用例)
+├── scripts/                            # 基准测试脚本 (HTTP/WSS/全量/报告)
+├── templates/                          # HTML 模板（{{variable}} 变量替换）
 └── init.sql                            # 数据库初始化脚本
 ```
 
 ## 功能验证
+
+### 单元测试
+
+项目包含完整的单元测试套件（82 个测试用例），覆盖全部核心模块：
+
+```bash
+# 编译并运行所有测试
+cmake -S . -B build && cmake --build build -j 2
+for t in build/tests/test_*; do $t; done
+
+# 或使用 CMake 自定义目标
+cmake --build build --target run_tests
+```
+
+| 测试文件 | 模块 | 用例数 |
+|----------|------|--------|
+| `test_infra_threadpool` | 线程池：入队/批量/队列/关闭/状态 | 7 |
+| `test_infra_mempool` | 内存池：分配/FIFO/耗尽/RAII/统计 | 11 |
+| `test_infra_logger` | 日志系统：级别过滤/模块过滤/输出 | 6 |
+| `test_http_route` | 路由匹配：静态/动态/通配符/404/方法 | 9 |
+| `test_http_middleware` | 中间件链：洋葱模型/路径过滤/鉴权 | 6 |
+| `test_http_session` | 会话管理：CRUD/过期/清理/Cookie | 11 |
+| `test_http_response` | 响应构建：HTML/JSON/File/Binary/重定向 | 12 |
+| `test_http_template` | 模板引擎：加载/变量替换/fallback | 5 |
+| `test_http_db` | 数据库连接池：初始化/获取/查询/计数 | 5 |
+| `test_edge_input` | 异常输入：大Header/路径穿越/畸形请求 | 6 |
+| `test_edge_cert` | 证书异常：不匹配/缺失/空路径 (需 WSS) | 5 |
+| `test_edge_stress` | 并发压力：1000请求/统计/重启/fd泄露 | 4 |
+
+### 性能基准测试
+
+提供参数化基准服务器和自动化测定脚本，可对 `main`（纯 HTTP）和 `feature/WebSocket`（HTTP + WSS）分支分别测试：
+
+```bash
+# 安装依赖
+sudo apt install wrk
+
+# 启动基准服务器（参数化配置）
+./build/examples/bench_server --port 8080 --threads 4 --mempool --routes 100
+
+# 运行 HTTP 全指标测定 (~3 分钟)
+bash scripts/run_http_bench.sh main results/main
+
+# 运行 WSS 全指标测定 (需先启动带 WSS 的服务器)
+./build/examples/bench_server --port 18080 --wss-port 18990 \
+    --cert /tmp/bench_cert.pem --key /tmp/bench_key.pem --threads 4 &
+bash scripts/run_wss_bench.sh feature/WebSocket results/wss
+
+# 双分支全量测定 (自动切换分支、编译、测试)
+bash scripts/bench_all.sh
+
+# 生成对比报告
+bash scripts/generate_report.sh
+```
+
+基准服务器 CLI 选项：
+
+| 选项 | 默认值 | 说明 |
+|------|--------|------|
+| `--port PORT` | 8080 | HTTP 端口 |
+| `--threads N` | 4 | 工作线程数 |
+| `--mempool` | off | 启用 12KB 固定块内存池 |
+| `--routes N` | 0 | 额外注册 N 条路由 (测路由扩展性, 最大 5000) |
+| `--middleware N` | 0 | 额外全局中间件层数 (最大 50) |
+| `--session` | off | 启用 Session 中间件 |
+| `--template` | off | 启用 Template 端点 |
+| `--wss-port PORT` | 0 | WSS 端口 (0=禁用, 需 `ENABLE_WSS=ON`) |
+| `--cert FILE` | /tmp/bench_cert.pem | TLS 证书路径 |
+| `--key FILE` | /tmp/bench_key.pem | TLS 私钥路径 |
+
+测定覆盖：
+
+| 指标 ID | 内容 | 工具 |
+|---------|------|------|
+| A1-A5 | HTTP 吞吐量/延迟/并发/内存 | `wrk` |
+| B1-B3 | 线程扩展性/内存池收益/路由退化 | `wrk` |
+| C1-C2 | 中间件开销/会话开销 | `wrk` |
+| D1-D5 | WSS 消息吞吐/握手速率/并发/文件传输 | `wscat` + `openssl` |
 
 启动 `full_demo` 后可用端点：
 
@@ -686,7 +768,7 @@ HttpFramework/
 
 ```bash
 # 压力测试
-ab -n 10000 -c 100 http://localhost:8080/
+wrk -t4 -c100 -d30s http://localhost:8080/
 
 # API 测试
 curl http://localhost:8080/api/status

@@ -6,6 +6,10 @@ target_link_libraries(hello_world PRIVATE http_framework)
 add_executable(full_demo full_demo.cpp)
 target_link_libraries(full_demo PRIVATE http_framework)
 
+# 性能基准测试服务器
+add_executable(bench_server bench_server.cpp)
+target_link_libraries(bench_server PRIVATE http_framework)
+
 # WSS echo 示例（需要 ENABLE_WSS=ON + OpenSSL）
 if(ENABLE_WSS)
     add_executable(wss_echo wss_echo.cpp)
