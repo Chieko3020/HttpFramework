@@ -1,0 +1,13 @@
+=== a1_plaintext_hc: 纯文本吞吐量 - 1000 并发 ===
+分支: main
+时间: 2026-05-30T16:07:34+08:00
+---
+Running 30s test @ http://localhost:18980/bench/plaintext
+  4 threads and 1000 connections
+  Thread Stats   Avg      Stdev     Max   +/- Stdev
+    Latency    69.89ms  239.40ms   1.96s    95.81%
+    Req/Sec    11.72k     2.99k   21.94k    77.17%
+  1404613 requests in 31.92s, 210.31MB read
+  Socket errors: connect 0, read 1404747, write 0, timeout 0
+Requests/sec:  43999.52
+Transfer/sec:      6.59MB

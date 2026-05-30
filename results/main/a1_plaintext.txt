@@ -1,0 +1,13 @@
+=== a1_plaintext: 纯文本吞吐量 - 2 连接 ===
+分支: main
+时间: 2026-05-30T16:06:58+08:00
+---
+Running 30s test @ http://localhost:18980/bench/plaintext
+  2 threads and 100 connections
+  Thread Stats   Avg      Stdev     Max   +/- Stdev
+    Latency    41.05ms  208.10ms   1.76s    96.26%
+    Req/Sec    18.19k     1.48k   21.56k    82.39%
+  1092159 requests in 31.83s, 163.53MB read
+  Socket errors: connect 0, read 1092491, write 0, timeout 0
+Requests/sec:  34314.58
+Transfer/sec:      5.14MB

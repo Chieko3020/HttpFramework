@@ -1,0 +1,44 @@
+=== c1_middleware: 不同中间件层数的吞吐量变化 ===
+分支: main
+时间: 2026-05-30T16:16:08+08:00
+---
+  --- 中间件层数: 0 ---
+Running 15s test @ http://localhost:18980/bench/plaintext
+  2 threads and 100 connections
+  Thread Stats   Avg      Stdev     Max   +/- Stdev
+    Latency     2.80ms    2.39ms  21.54ms   75.64%
+    Req/Sec    18.48k     0.90k   21.28k    69.87%
+  555374 requests in 15.10s, 83.15MB read
+  Socket errors: connect 0, read 555531, write 0, timeout 0
+Requests/sec:  36779.93
+Transfer/sec:      5.51MB
+  --- 中间件层数: 1 ---
+Running 15s test @ http://localhost:18980/bench/plaintext
+  2 threads and 100 connections
+  Thread Stats   Avg      Stdev     Max   +/- Stdev
+    Latency    78.24ms  288.68ms   1.77s    93.20%
+    Req/Sec    18.96k     1.97k   21.80k    90.73%
+  572581 requests in 16.84s, 85.73MB read
+  Socket errors: connect 0, read 572738, write 0, timeout 0
+Requests/sec:  33998.14
+Transfer/sec:      5.09MB
+  --- 中间件层数: 5 ---
+Running 15s test @ http://localhost:18980/bench/plaintext
+  2 threads and 100 connections
+  Thread Stats   Avg      Stdev     Max   +/- Stdev
+    Latency    70.55ms  277.50ms   1.78s    93.73%
+    Req/Sec    24.91k     2.50k   28.41k    95.36%
+  750206 requests in 16.81s, 112.33MB read
+  Socket errors: connect 0, read 750446, write 0, timeout 0
+Requests/sec:  44636.80
+Transfer/sec:      6.68MB
+  --- 中间件层数: 10 ---
+Running 15s test @ http://localhost:18980/bench/plaintext
+  2 threads and 100 connections
+  Thread Stats   Avg      Stdev     Max   +/- Stdev
+    Latency     2.27ms  527.31us   9.52ms   79.95%
+    Req/Sec    19.98k     0.95k   23.66k    84.33%
+  596510 requests in 15.00s, 89.31MB read
+  Socket errors: connect 0, read 596933, write 0, timeout 0
+Requests/sec:  39763.77
+Transfer/sec:      5.95MB

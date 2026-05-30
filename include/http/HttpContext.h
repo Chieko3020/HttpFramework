@@ -41,13 +41,13 @@ public:
     // 数据缓冲区管理 - 支持内存池和传统方式
     void appendData(const std::string& data);
     void appendData(const char* data, size_t len);
-    const std::string& getData() const;
+    std::string getData() const;
     void clearData();
-    
+
     // 响应数据管理 - 支持内存池和传统方式
     void setResponseData(const std::string& data);
     void setResponseData(const char* data, size_t len);
-    const std::string& getResponseData() const;
+    std::string getResponseData() const;
     
     // 内存池管理
     void enableMemoryPool(bool enable = true);
