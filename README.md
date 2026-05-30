@@ -4,7 +4,7 @@
 - epoll ET 模式 + 非阻塞 I/O，支持高并发
 - WSS 扩展：TLS 1.3 加密、WebSocket 全双工通信、0-RTT Early Data、会话复用、文件分片断点续传（可选启用）
 - 路由系统：HTTP 静态路由/动态路由（`:id`）/通配符 + WSS 路径路由
-- 中间件系统：HTTP 链式中间件 + WSS 消息中间件，支持路径过滤，统一 `next()` 流转
+- 中间件系统：HTTP 链式中间件 + WSS 消息中间件，支持路径过滤
 - 会话管理：Session/Cookie 完整生命周期管理，自动过期清理，线程安全
 - MySQL 连接池：连接复用、健康检查、事务支持，简化数据库操作
 - 固定大小内存池：12KB 块，零动态分配，避免内存碎片，线程安全
@@ -18,10 +18,23 @@
 ### 依赖
 
 ```bash
-sudo apt install build-essential cmake libboost-all-dev libmysqlcppconn-dev
+# 必需
+sudo apt install build-essential cmake libboost-all-dev
+
+# 可选：数据库支持
+sudo apt install libmysqlcppconn-dev
+
+# 可选：WSS 扩展 (TLS 1.3 + WebSocket)
+sudo apt install libssl-dev
+
+# 可选：性能基准测试
+sudo apt install wrk bc
+# WSS 基准测试还需: npm install -g wscat
 ```
 
-MySQL Connector/C++ 可选 — 未安装时数据库功能自动禁用，服务器正常启动。
+MySQL Connector/C++ 可选 — 未安装时数据库功能自动禁用。
+OpenSSL 3.x 可选 — 仅启用 `ENABLE_WSS` 时需要。
+`wrk`、`bc`、`wscat` 仅用于性能基准测试脚本。
 
 ### 编译 & 运行
 
@@ -36,7 +49,7 @@ cmake -S . -B build -DENABLE_WSS=ON && cmake --build build
 # 生成自签名证书
 openssl req -x509 -newkey rsa:2048 -keyout certs/server_key.pem \
     -out certs/server_cert.pem -days 365 -nodes -subj "/CN=localhost"
-./build/examples/wss_echo        # HTTP :8080 + WSS :9443 双协议服务
+./build/examples/wss_echo        # HTTP :8080 + WSS :9443
 ```
 
 访问 `http://localhost:8080`，WebSocket 演示连接 `wss://localhost:9443`
@@ -328,7 +341,7 @@ cmake --build build
 - **处理器分发**：请求到处理器的映射和分发
 
 ### 中间件层
-- **链式处理**：多个中间件串联执行，`next()` 控制流转
+- **链式处理**：多个中间件串联执行，`next()` 控制执行流程
 - **路径过滤**：中间件可指定作用路径前缀（如 `/api`）
 - **上下文传递**：请求上下文在中间件间传递
 - **内置中间件**：日志、会话管理开箱即用
@@ -433,7 +446,7 @@ class WssReactor {
 
 ### WsRouter — WSS 路由引擎（ENABLE_WSS）
 
-路径匹配 + 中间件链，支持 `:param` 动态路由和 `next()` 中间件流转。
+路径匹配 + 中间件链，支持 `:param` 动态路由和 `next()` 中间件链式调用。
 
 ```cpp
 class WsRouter {
@@ -646,7 +659,7 @@ class HttpServer {
 
 ```
 HttpFramework/
-├── CMakeLists.txt                      # 主构建配置（含 in-source build 拦截）
+├── CMakeLists.txt                      # 主构建配置
 ├── cmake/
 │   └── HttpFrameworkConfig.cmake.in    # find_package 包配置模板
 ├── include/
@@ -657,7 +670,7 @@ HttpFramework/
 │   ├── session/                        # Session / SessionManager / SessionStorage
 │   ├── middleware/                     # SessionMiddleware
 │   └── utils/                          # MemoryPool / ThreadPool / TemplateLoader / db
-├── src/                                # 源文件（与 include 一一对应）
+├── src/                                # 源文件
 │   └── wss/                            # WSS 模块实现
 ├── templates/                          # HTML 模板（{{variable}} 变量替换）
 ├── examples/
@@ -665,7 +678,7 @@ HttpFramework/
 │   ├── full_demo.cpp                   # 全功能演示（路由/会话/DB/模板/统计）
 │   ├── bench_server.cpp                # 性能基准测试服务器
 │   └── wss_echo.cpp                    # WSS 回显演示（需 ENABLE_WSS=ON）
-├── tests/                              # 单元测试 (12 文件, 82 用例)
+├── tests/                              # 单元测试
 ├── scripts/                            # 基准测试脚本 (HTTP/WSS/全量/报告)
 ├── templates/                          # HTML 模板（{{variable}} 变量替换）
 └── init.sql                            # 数据库初始化脚本
@@ -697,7 +710,7 @@ cmake --build build --target run_tests
 | `test_http_response` | 响应构建：HTML/JSON/File/Binary/重定向 | 12 |
 | `test_http_template` | 模板引擎：加载/变量替换/fallback | 5 |
 | `test_http_db` | 数据库连接池：初始化/获取/查询/计数 | 5 |
-| `test_edge_input` | 异常输入：大Header/路径穿越/畸形请求 | 6 |
+| `test_edge_input` | 异常输入：Header过大/路径穿越/畸形请求 | 6 |
 | `test_edge_cert` | 证书异常：不匹配/缺失/空路径 (需 WSS) | 5 |
 | `test_edge_stress` | 并发压力：1000请求/统计/重启/fd泄露 | 4 |
 
@@ -726,6 +739,9 @@ bash scripts/bench_all.sh
 # 生成对比报告
 bash scripts/generate_report.sh
 ```
+
+> **注意**：使用 `--template` 选项时需在 build 目录下运行（`cd build && ./examples/bench_server ...`），
+> 确保 `templates/` 目录可访问。WSS 测试需先生成自签名证书。
 
 基准服务器 CLI 选项：
 
@@ -898,7 +914,9 @@ public:
 
 ## 故障排除
 
-**编译错误**：确保依赖完整 → `apt install libboost-all-dev libmysqlcppconn-dev`，清理重编 → `rm -rf build && cmake -S . -B build && cmake --build build`
+**编译错误**：确保依赖完整 → `apt install build-essential cmake libboost-all-dev libmysqlcppconn-dev libssl-dev`，清理重编 → `rm -rf build && cmake -S . -B build && cmake --build build`
+
+**WSS 编译失败**：确认 OpenSSL 已安装 → `dpkg -l libssl-dev`，使用 `-DENABLE_WSS=OFF` 可跳过 WSS 模块
 
 **数据库连接失败**：MySQL 不可用时 `enableDatabase()` 自动降级，检查 `sudo systemctl status mysql`，或直接不调用 `enableDatabase()`
 
