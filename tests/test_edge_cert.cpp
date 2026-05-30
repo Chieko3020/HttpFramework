@@ -115,19 +115,19 @@ static bool test_tls_config_fields() {
     http::wss::TlsConfig cfg;
 
     // 检查默认值
-    CHECK(cfg.minTlsVersion == http::wss::TlsVersion::V1_3,
-          "默认 TLS 版本应为 1.3");
+    CHECK(cfg.minTlsVersion == 13,
+          "默认 TLS 版本应为 13 (TLS 1.3)");
     CHECK(cfg.enableSessionTicket == true,
           "默认应启用 SessionTicket");
     CHECK(cfg.enable0Rtt == false,
           "默认应禁用 0-RTT");
 
     // 自定义配置
-    cfg.minTlsVersion = http::wss::TlsVersion::V1_2;
+    cfg.minTlsVersion = 12;
     cfg.sessionTimeoutSeconds = 600;
     cfg.maxEarlyData = 65536;
 
-    CHECK(cfg.minTlsVersion == http::wss::TlsVersion::V1_2, "TLS 版本应可修改");
+    CHECK(cfg.minTlsVersion == 12, "TLS 版本应可修改");
     CHECK(cfg.sessionTimeoutSeconds == 600, "超时时间应可配置");
     CHECK(cfg.maxEarlyData == 65536, "maxEarlyData 应可配置");
 
