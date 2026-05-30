@@ -17,6 +17,7 @@
 #include "utils/TemplateLoader.h"
 
 #include <iostream>
+#include <fstream>
 #include <cstring>
 #include <string>
 
@@ -176,9 +177,20 @@ int main(int argc, char* argv[]) {
     // ── Template 端点 (如果启用) ──────────────────────────
 
     if (useTemplate) {
+        // 检查模板目录是否可访问
+        std::ifstream testFile("templates/index.html");
+        if (!testFile.good()) {
+            std::cerr << "[BENCH] 警告: templates/index.html 不可访问, "
+                      << "请在 build 目录下运行 bench_server\n";
+        }
         app.get("/bench/template", [](const http::HttpRequest&, http::HttpResponse& res) {
             std::string rendered = utils::TemplateLoader::loadTemplate("index.html");
-            res.setHtml(rendered);
+            if (rendered.empty()) {
+                res.setStatus(http::HttpStatus::NOT_FOUND);
+                res.setJson(R"({"error":"template not found"})");
+            } else {
+                res.setHtml(rendered);
+            }
         });
     }
 

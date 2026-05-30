@@ -86,6 +86,7 @@ private:
 
     // 业务线程池
     std::unique_ptr<utils::ThreadPool> threadPool_;
+    size_t threadPoolSize_;  // 保存线程数，用于 stop() 后重启时重建
 
     // 路由
     std::shared_ptr<router::Router> router_;
