@@ -778,7 +778,7 @@ public:
 
 ## 故障排除
 
-**编译错误**：确保依赖完整 → `apt install libboost-all-dev libmysqlcppconn-dev`，清理重编 → `rm -rf build && cmake -S . -B build && cmake --build build`
+**编译错误**：确保依赖完整 `apt install libboost-all-dev libmysqlcppconn-dev`，清理重编 `rm -rf build && cmake -S . -B build && cmake --build build`
 
 **数据库连接失败**：MySQL 不可用时 `enableDatabase()` 自动降级，检查 `sudo systemctl status mysql`，或直接不调用 `enableDatabase()`
 
