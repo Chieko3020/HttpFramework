@@ -14,10 +14,18 @@
 ### 依赖
 
 ```bash
-sudo apt install build-essential cmake libboost-all-dev libmysqlcppconn-dev
+# 必需
+sudo apt install build-essential cmake libboost-all-dev
+
+# 可选：数据库支持
+sudo apt install libmysqlcppconn-dev
+
+# 可选：性能基准测试
+sudo apt install wrk bc
 ```
 
 MySQL Connector/C++ 可选 — 未安装时数据库功能自动禁用，服务器正常启动。
+`wrk` 和 `bc` 仅用于性能基准测试脚本，不影响框架编译和运行。
 
 ### 编译 & 运行
 
@@ -39,7 +47,7 @@ cmake --install build --prefix /usr/local
 
 ## 两种使用方式
 
-推荐使用 `http::App` 类，将 Router、HttpServer、SessionManager、DbConnectionPool 封装在一起，提供链式 API，大幅减少样板代码。
+推荐使用 `http::App` 类，将 Router、HttpServer、SessionManager、DbConnectionPool 封装在一起，提供链式 API，大幅减少代码编写。
 
 ### 方式一：编写代码
 
@@ -463,7 +471,7 @@ void SessionManager::cleanupExpiredSessions() {
 
 **如何设计高效的并发模型以支持数千并发连接？**
 
-采用多 Reactor 模型：main Reactor 线程仅 accept + round-robin 分发连接。sub Reactor 线程（默认 `hardware_concurrency` 个）各带独立 epoll，分别处理自己那组连接的 read/write，I/O 负载天然分散。业务逻辑提交到线程池异步执行，避免阻塞 sub Reactor。ET 模式减少 epoll_wait 调用频率，非阻塞 I/O 避免线程空等。
+采用多 Reactor 模型：main Reactor 线程仅 accept + round-robin 分发连接。sub Reactor 线程（默认 `hardware_concurrency` 个）各带独立 epoll，分别处理自己那组连接的 read/write。业务逻辑提交到线程池异步执行，避免阻塞 sub Reactor。ET 模式减少 epoll_wait 调用频率，非阻塞 I/O 避免线程空等。
 
 ```cpp
 // epoll ET 模式配置
@@ -539,7 +547,7 @@ class HttpServer {
 
 ```
 HttpFramework/
-├── CMakeLists.txt                      # 主构建配置（含 in-source build 拦截）
+├── CMakeLists.txt                      # 主构建配置
 ├── cmake/
 │   └── HttpFrameworkConfig.cmake.in    # find_package 包配置模板
 ├── include/
@@ -556,7 +564,7 @@ HttpFramework/
 │   ├── full_demo.cpp                   # 全功能演示（路由/会话/DB/模板/统计）
 │   └── bench_server.cpp                # 性能基准测试服务器
 ├── tests/                              # 单元测试
-├── scripts/                            # 基准测试脚本 (run_http_bench / bench_all / generate_report)
+├── scripts/                            # 基准测试脚本
 ├── templates/                          # HTML 模板（{{variable}} 变量替换）
 └── init.sql                            # 数据库初始化脚本
 ```
@@ -607,6 +615,9 @@ bash scripts/run_http_bench.sh main results/main
 # 生成报告
 bash scripts/generate_report.sh
 ```
+
+> **注意**：使用 `--template` 选项时需在 build 目录下运行（`cd build && ./examples/bench_server ...`），
+> 确保 `templates/` 目录可访问。Template 不可用时端点返回 404 而非空响应。
 
 基准服务器 CLI 选项：
 
