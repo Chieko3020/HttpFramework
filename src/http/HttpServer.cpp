@@ -136,11 +136,11 @@ bool HttpServer::initializeServer() {
         return false;
     }
 
-    if (setsockopt(listenFd_, SOL_SOCKET, SO_REUSEPORT, &opt, sizeof(opt)) < 0) {
-        std::cerr << "Failed to set SO_REUSEPORT: " << strerror(errno) << std::endl;
-        close(listenFd_);
-        return false;
-    }
+    // 注意：不使用 SO_REUSEPORT。
+    // SO_REUSEPORT 允许多个 socket 绑定同一端口，内核轮询分发连接。
+    // 在多进程负载均衡场景中有用，但本框架各 HttpServer 实例持有独立的 Router
+    // 和 ThreadPool，并行绑定会导致路由不一致、资源隔离失效。
+    // 仅使用 SO_REUSEADDR（允许 TIME_WAIT 端口快速重用）。
 
     if (!setNonBlocking(listenFd_)) {
         std::cerr << "Failed to set non-blocking: " << strerror(errno) << std::endl;

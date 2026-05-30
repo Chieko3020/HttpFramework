@@ -39,7 +39,8 @@ private:
     std::string extractSessionId(const http::HttpRequest& request);
     
     // 设置会话Cookie
-    void setSessionCookie(http::HttpResponse& response, const std::string& sessionId);
+    void setSessionCookie(http::HttpResponse& response, const std::string& sessionId,
+                          std::chrono::seconds maxAge);
     
     // 解析Cookie字符串
     std::unordered_map<std::string, std::string> parseCookies(const std::string& cookieHeader);
