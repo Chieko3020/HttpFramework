@@ -23,7 +23,7 @@ void SessionMiddleware::operator()(const http::HttpRequest& request, http::HttpR
     if (!session) {
         // 创建新会话
         session = sessionManager_->createSession();
-        setSessionCookie(response, session->getId());
+        setSessionCookie(response, session->getId(), session->getExpirationTime());
     }
     
     // 将会话添加到请求上下文中
@@ -34,7 +34,7 @@ void SessionMiddleware::operator()(const http::HttpRequest& request, http::HttpR
     
     // 如果会话被修改，更新Cookie
     if (session && session->isValid()) {
-        setSessionCookie(response, session->getId());
+        setSessionCookie(response, session->getId(), session->getExpirationTime());
     }
 }
 
@@ -49,7 +49,8 @@ std::string SessionMiddleware::extractSessionId(const http::HttpRequest& request
     return (it != cookies.end()) ? it->second : "";
 }
 
-void SessionMiddleware::setSessionCookie(http::HttpResponse& response, const std::string& sessionId) {
+void SessionMiddleware::setSessionCookie(http::HttpResponse& response, const std::string& sessionId,
+                                          std::chrono::seconds maxAge) {
     std::ostringstream cookie;
     cookie << cookieName_ << "=" << sessionId;
     cookie << "; Path=" << cookiePath_;
@@ -67,7 +68,7 @@ void SessionMiddleware::setSessionCookie(http::HttpResponse& response, const std
     }
     
     // 设置过期时间（会话过期时间）
-    cookie << "; Max-Age=" << sessionManager_->getSessionCount(); // 这里应该使用实际的过期时间
+    cookie << "; Max-Age=" << maxAge.count();
     
     response.setHeader("Set-Cookie", cookie.str());
 }

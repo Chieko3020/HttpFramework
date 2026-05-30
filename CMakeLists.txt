@@ -87,6 +87,8 @@ if(BUILD_EXAMPLES)
     add_subdirectory(examples)
 endif()
 
+add_subdirectory(tests)
+
 # ---- 安装规则 ----
 install(TARGETS http_framework
     EXPORT HttpFrameworkTargets

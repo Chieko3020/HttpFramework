@@ -141,8 +141,8 @@ std::pair<std::regex, std::vector<std::string>> RouterHandler::pathToRegex(const
         }
     }
     
-    // 替换通配符 *
-    result = std::regex_replace(result, std::regex(R"(\*)"), R"((.*))");
+    // 替换通配符 *（需要匹配转义后的 \*）
+    result = std::regex_replace(result, std::regex(R"(\\\*)"), R"((.*))");
     
     return {std::regex("^" + result + "$"), paramNames};
 }
