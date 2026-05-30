@@ -368,7 +368,7 @@ void HttpServer::mainReactorLoop() {
         int n = epoll_wait(mainEpollFd_, events_, MAX_EVENTS, 1000);
         for (int i = 0; i < n; ++i) {
             if (events_[i].data.fd == listenFd_ && (events_[i].events & EPOLLIN))
-                handleAccept();                 // accept → 轮询分发到 sub reactor
+                handleAccept();                 // accept 轮询分发到 sub reactor
         }
     }
 }
