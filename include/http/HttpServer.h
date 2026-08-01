@@ -61,9 +61,12 @@ private:
     // ---- SubReactor ----
     struct SubReactor {
         int epollFd = -1;
+        int wakeFd = -1;           // eventfd, 跨线程通知 sub reactor 有响应待发送
         std::thread thread;
         std::map<int, std::unique_ptr<HttpContext>> contexts;
         std::mutex contextsMutex;
+        std::mutex wakeMutex;      // 保护 pendingWrites 队列
+        std::vector<int> pendingWrites;  // 待发送响应的 fd 列表
     };
 
     int port_;
@@ -114,6 +117,7 @@ private:
     void subReactorLoop(int index);
     void handleRead(int clientFd, int subReactorIndex);
     void handleWrite(int clientFd, int subReactorIndex);
+    void handleWake(int subReactorIndex);   // 处理 eventfd 唤醒，批量发送响应
     void closeConnection(int fd, int subReactorIndex);
 
     // ---- 业务处理（线程池中执行） ----

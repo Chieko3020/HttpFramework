@@ -6,6 +6,7 @@
 #include <cstring>
 #include <errno.h>
 #include <chrono>
+#include <sys/eventfd.h>
 
 namespace http {
 
@@ -103,11 +104,15 @@ void HttpServer::stop() {
         mainEpollFd_ = -1;
     }
 
-    // 关闭所有子 epoll（唤醒子 Reactor）
+    // 关闭所有子 epoll 和 eventfd（唤醒子 Reactor）
     for (auto& sr : subReactors_) {
         if (sr && sr->epollFd >= 0) {
             close(sr->epollFd);
             sr->epollFd = -1;
+        }
+        if (sr && sr->wakeFd >= 0) {
+            close(sr->wakeFd);
+            sr->wakeFd = -1;
         }
     }
 
@@ -243,6 +248,30 @@ bool HttpServer::setupSubReactor(size_t index) {
                   << ": " << strerror(errno) << std::endl;
         return false;
     }
+
+    // 创建 eventfd 用于跨线程唤醒（worker 线程通知 sub reactor 有响应待发送）
+    sr->wakeFd = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
+    if (sr->wakeFd < 0) {
+        std::cerr << "[ERROR][HTTP服务器]：创建 eventfd 失败, index=" << index
+                  << ": " << strerror(errno) << std::endl;
+        close(sr->epollFd);
+        sr->epollFd = -1;
+        return false;
+    }
+
+    struct epoll_event ev;
+    ev.events = EPOLLIN | EPOLLET;
+    ev.data.fd = sr->wakeFd;
+    if (epoll_ctl(sr->epollFd, EPOLL_CTL_ADD, sr->wakeFd, &ev) < 0) {
+        std::cerr << "[ERROR][HTTP服务器]：注册 eventfd 到 epoll 失败, index=" << index
+                  << ": " << strerror(errno) << std::endl;
+        close(sr->wakeFd);
+        close(sr->epollFd);
+        sr->wakeFd = -1;
+        sr->epollFd = -1;
+        return false;
+    }
+
     return true;
 }
 
@@ -368,6 +397,12 @@ void HttpServer::subReactorLoop(int index) {
             int fd = events[i].data.fd;
             uint32_t ev = events[i].events;
 
+            // eventfd 唤醒：批量处理待发送的响应
+            if (fd == sr->wakeFd) {
+                handleWake(index);
+                continue;
+            }
+
             if (ev & (EPOLLERR | EPOLLHUP)) {
                 closeConnection(fd, index);
             } else {
@@ -433,6 +468,26 @@ void HttpServer::handleRead(int clientFd, int subReactorIndex) {
     }
 }
 
+void HttpServer::handleWake(int subReactorIndex) {
+    auto& sr = subReactors_[subReactorIndex];
+
+    // 消费 eventfd 的写入（防止电平触发重复唤醒）
+    uint64_t val;
+    read(sr->wakeFd, &val, sizeof(val));
+
+    // 拉取待发送的 fd 列表
+    std::vector<int> fds;
+    {
+        std::lock_guard<std::mutex> lock(sr->wakeMutex);
+        fds.swap(sr->pendingWrites);
+    }
+
+    // 在当前 sub reactor 线程执行 send
+    for (int fd : fds) {
+        handleWrite(fd, subReactorIndex);
+    }
+}
+
 void HttpServer::handleWrite(int clientFd, int subReactorIndex) {
     auto& sr = subReactors_[subReactorIndex];
     HttpContext* ctxPtr = nullptr;
@@ -454,11 +509,13 @@ void HttpServer::handleWrite(int clientFd, int subReactorIndex) {
         size_t offset = ctxPtr->getWriteOffset();
         size_t bytesWritten = 0;
 
+        // write 在当前 sub reactor 线程执行，安全
         if (writeAllDataFromOffset(clientFd, responseData, offset, &bytesWritten)) {
             ctxPtr->resetWriteOffset();
             closeConnection(clientFd, subReactorIndex);
         } else {
             ctxPtr->setWriteOffset(offset + bytesWritten);
+            // 部分写，重新注册 EPOLLOUT（仍在 sub reactor 线程，无跨线程问题）
             struct epoll_event event;
             event.events = EPOLLOUT | EPOLLET | EPOLLONESHOT;
             event.data.fd = clientFd;
@@ -514,10 +571,13 @@ void HttpServer::processHttpRequest(int subReactorIndex, int clientFd,
             }
         }
 
-        struct epoll_event event;
-        event.events = EPOLLOUT | EPOLLET | EPOLLONESHOT;
-        event.data.fd = clientFd;
-        epoll_ctl(sr->epollFd, EPOLL_CTL_MOD, clientFd, &event);
+        // 通过 eventfd 唤醒 sub reactor 线程执行 send，避免跨线程 epoll_ctl 竞态
+        {
+            std::lock_guard<std::mutex> lock(sr->wakeMutex);
+            sr->pendingWrites.push_back(clientFd);
+        }
+        uint64_t one = 1;
+        write(sr->wakeFd, &one, sizeof(one));
 
         stats_.completedRequests.fetch_add(1);
         stats_.queuedTasks.fetch_sub(1);
@@ -539,10 +599,13 @@ void HttpServer::processHttpRequest(int subReactorIndex, int clientFd,
             }
         }
 
-        struct epoll_event event;
-        event.events = EPOLLOUT | EPOLLET | EPOLLONESHOT;
-        event.data.fd = clientFd;
-        epoll_ctl(sr->epollFd, EPOLL_CTL_MOD, clientFd, &event);
+        // 通过 eventfd 唤醒 sub reactor 线程执行 send
+        {
+            std::lock_guard<std::mutex> lock(sr->wakeMutex);
+            sr->pendingWrites.push_back(clientFd);
+        }
+        uint64_t one = 1;
+        write(sr->wakeFd, &one, sizeof(one));
 
         stats_.queuedTasks.fetch_sub(1);
     }

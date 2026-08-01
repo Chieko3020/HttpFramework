@@ -322,7 +322,7 @@ cmake --build build
 ```
 
 ### 网络层
-- **多 Reactor 模式**：main Reactor 仅 accept + 轮询分发连接；sub Reactor 各自独立 epoll 处理 read/write；线程池处理业务逻辑
+- **多 Reactor 模式**：main Reactor 仅 accept + 轮询分发连接；sub Reactor 各自独立 epoll 处理 read/write；WSS 由于需要额外处理帧解析，使用一个单独的 epoll 线程；HTTP 和 WSS 共享同一个线程池处理业务逻辑；worker 线程通过 eventfd 唤醒 sub Reactor 执行 send，避免跨线程 epoll_ctl 竞态
 - **epoll ET 模式**：边缘触发，减少 epoll_wait 系统调用次数
 - **非阻塞 I/O**：避免线程阻塞，提高并发能力
 - **连接管理**：连接创建、复用、资源回收
@@ -463,11 +463,23 @@ class WsRouter {
 ### 请求处理流程
 
 ```
-客户端连接 → main Reactor accept → round-robin 分发给 sub Reactor
+客户端连接 → main Reactor accept → round-robin 分发给 HTTP sub Reactor
+                                                │ (Upgrade 头)
+                                                ▼
+                                          WSS epoll 线程 (TLS + WebSocket帧)
+     ↓                                             ↓
+sub Reactor epoll 监听                      独立 epoll 处理 I/O
+     ↓                                             ↓
+非阻塞读取 → HTTP 解析                       帧解析/分片重组
+     ↓                                             ↓
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+提交到 共享线程池 (HTTP + WSS 共用)
      ↓
-sub Reactor epoll 监听 → 非阻塞读取 → HTTP 解析 → 提交线程池
+业务处理 → 路由匹配 → 中间件链 → 响应构建
      ↓
-业务处理 → 路由匹配 → 中间件链 → 响应构建 → 数据发送 → 资源清理
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+HTTP: worker 写 eventfd → sub Reactor 被唤醒 → send 响应
+WSS:  worker 写 eventfd → WSS epoll 被唤醒 → send 响应帧
 ```
 
 ### Reactor 事件循环
@@ -486,7 +498,8 @@ void HttpServer::mainReactorLoop() {
 }
 ```
 
-**子 Reactor** — 多个线程各带独立 epoll，处理分配的连接的 I/O：
+**子 Reactor** — 多个线程各带独立 epoll + eventfd，处理分配的连接的 I/O：
+（worker 线程通过 eventfd 唤醒 sub Reactor 批量发送响应，避免跨线程 epoll_ctl）
 
 ```cpp
 void HttpServer::subReactorLoop(int index) {
@@ -494,6 +507,8 @@ void HttpServer::subReactorLoop(int index) {
         int n = epoll_wait(subReactors_[index].epollFd, events, MAX_EVENTS, 1000);
         for (int i = 0; i < n; ++i) {
             int fd = events[i].data.fd;
+            // eventfd 唤醒：批量处理 pending writes
+            if (fd == subReactors_[index].wakeFd) { handleWake(index); continue; }
             if (events[i].events & (EPOLLERR | EPOLLHUP)) closeConnection(fd, index);
             else {
                 if (events[i].events & EPOLLIN)  handleRead(fd, index);
