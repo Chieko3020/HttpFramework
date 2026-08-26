@@ -77,6 +77,9 @@ public:
     // 清空缓冲区
     void clear();
     
+    // 消费前 n 字节（将剩余数据前移，解决粘包问题）
+    void consume(size_t n);
+    
     // 获取已使用大小
     size_t getUsedSize() const { return usedSize_; }
     

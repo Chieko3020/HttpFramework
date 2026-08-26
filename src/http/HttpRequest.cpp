@@ -48,10 +48,14 @@ bool HttpRequest::parse(const std::string& rawRequest) {
     size_t headerEnd = rawRequest.find("\r\n\r\n");
     size_t bodyStart;
     if (headerEnd != std::string::npos) {
+        headerEnd_ = headerEnd;
+        headerEndSepLen_ = 4;
         bodyStart = headerEnd + 4;  // 跳过 "\r\n\r\n"
     } else {
         headerEnd = rawRequest.find("\n\n");
         if (headerEnd != std::string::npos) {
+            headerEnd_ = headerEnd;
+            headerEndSepLen_ = 2;
             bodyStart = headerEnd + 2;  // 跳过 "\n\n"
         } else {
             bodyStart = std::string::npos;

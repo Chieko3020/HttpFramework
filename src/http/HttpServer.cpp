@@ -443,7 +443,10 @@ void HttpServer::handleRead(int clientFd, int subReactorIndex) {
     auto request = std::make_shared<HttpRequest>();
     if (request->parse(ctxPtr->getData())) {
         auto response = std::make_shared<HttpResponse>();
-        ctxPtr->clearData();
+        // 只消费已解析的请求数据，保留缓冲区中可能的下一个请求（解决 TCP 粘包）
+        size_t consumed = request->getHeaderEnd() + request->getHeaderEndSepLen()
+                          + request->getContentLength();
+        ctxPtr->consumeData(consumed);
 
         auto task = std::make_shared<HttpRequestTask>(
             clientFd, request, response,

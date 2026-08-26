@@ -43,6 +43,7 @@ public:
     void appendData(const char* data, size_t len);
     std::string getData() const;
     void clearData();
+    void consumeData(size_t n);  // 只消费前 n 字节，保留剩余数据
 
     // 响应数据管理 - 支持内存池和传统方式
     void setResponseData(const std::string& data);

@@ -89,6 +89,20 @@ void HttpContext::clearData() {
     }
 }
 
+void HttpContext::consumeData(size_t n) {
+    if (useMemoryPool_) {
+        if (requestBuffer_) {
+            requestBuffer_->consume(n);
+        }
+    } else {
+        if (n >= buffer_.size()) {
+            buffer_.clear();
+        } else {
+            buffer_.erase(0, n);
+        }
+    }
+}
+
 void HttpContext::setResponseData(const std::string& data) {
     if (useMemoryPool_) {
         // 强制使用内存池，不再回退到std::string

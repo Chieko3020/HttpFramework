@@ -158,4 +158,15 @@ void PooledBuffer::clear() {
     }
 }
 
+void PooledBuffer::consume(size_t n) {
+    if (!block_ || n == 0) return;
+    if (n >= usedSize_) {
+        clear();
+        return;
+    }
+    size_t remaining = usedSize_ - n;
+    std::memmove(block_->data, block_->data + n, remaining);
+    usedSize_ = remaining;
+}
+
 } // namespace utils

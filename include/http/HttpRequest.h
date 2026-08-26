@@ -63,6 +63,10 @@ public:
     // 获取Content-Length
     size_t getContentLength() const;
     
+    // 获取头部结束位置（用于计算已消费数据量，解决粘包问题）
+    size_t getHeaderEnd() const { return headerEnd_; }
+    size_t getHeaderEndSepLen() const { return headerEndSepLen_; }
+    
     // 获取Content-Type
     std::string getContentType() const;
     
@@ -82,6 +86,8 @@ private:
     std::unordered_map<std::string, std::string> userData_;
     std::string body_;
     std::string rawRequest_;
+    size_t headerEnd_ = 0;
+    size_t headerEndSepLen_ = 0;  // 分隔符长度：\r\n\r\n=4, \n\n=2
     
     // 解析请求行
     bool parseRequestLine(const std::string& line);
