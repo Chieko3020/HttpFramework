@@ -51,7 +51,10 @@ void HttpContext::appendData(const std::string& data) {
         if (!requestBuffer_) {
             requestBuffer_ = std::make_unique<utils::PooledBuffer>(memoryPool_);
         }
-        requestBuffer_->write(data);
+        size_t written = requestBuffer_->write(data);
+        if (written < data.size()) {
+            truncated_ = true;
+        }
     } else {
         buffer_ += data;
     }
@@ -62,7 +65,10 @@ void HttpContext::appendData(const char* data, size_t len) {
         if (!requestBuffer_) {
             requestBuffer_ = std::make_unique<utils::PooledBuffer>(memoryPool_);
         }
-        requestBuffer_->write(data, len);
+        size_t written = requestBuffer_->write(data, len);
+        if (written < len) {
+            truncated_ = true;
+        }
     } else {
         buffer_.append(data, len);
     }

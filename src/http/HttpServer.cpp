@@ -441,6 +441,26 @@ void HttpServer::handleRead(int clientFd, int subReactorIndex) {
 
     ctxPtr->appendData(data);
 
+    // 内存池缓冲区满，请求体被截断
+    if (ctxPtr->isTruncated()) {
+        std::cerr << "[ERROR][HTTP服务器]：请求体超过内存池缓冲区上限" << std::endl;
+        auto response = std::make_shared<HttpResponse>();
+        response->setStatus(413, "Payload Too Large");
+        response->setBody("{\"error\":\"Payload too large\"}");
+        response->setHeader("Content-Type", "application/json");
+        auto task = std::make_shared<HttpRequestTask>(
+            clientFd, std::make_shared<HttpRequest>(), response,
+            [this, subReactorIndex](int fd, std::shared_ptr<HttpRequest> req,
+                                     std::shared_ptr<HttpResponse> res) {
+                processHttpRequest(subReactorIndex, fd, req, res);
+            }
+        );
+        threadPool_->enqueue([task]() {
+            task->execute();
+        });
+        return;
+    }
+
     auto request = std::make_shared<HttpRequest>();
     if (request->parse(ctxPtr->getData())) {
         auto response = std::make_shared<HttpResponse>();
