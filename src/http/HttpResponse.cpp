@@ -165,10 +165,11 @@ std::string HttpResponse::getReasonPhrase(int statusCode) const {
 
 std::string HttpResponse::getCurrentTime() const {
     std::time_t now = std::time(nullptr);
-    std::tm* tm = std::gmtime(&now);
+    std::tm tm;
+    ::gmtime_r(&now, &tm);
     
     std::ostringstream oss;
-    oss << std::put_time(tm, "%a, %d %b %Y %H:%M:%S GMT");
+    oss << std::put_time(&tm, "%a, %d %b %Y %H:%M:%S GMT");
     return oss.str();
 }
 
