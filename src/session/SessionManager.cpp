@@ -16,8 +16,17 @@ SessionManager::~SessionManager() {
 }
 
 std::shared_ptr<Session> SessionManager::createSession() {
-    std::string sessionId = generateUniqueSessionId();
-    return createSession(sessionId);
+    std::lock_guard<std::mutex> lock(sessionsMutex_);
+    
+    std::string sessionId;
+    do {
+        sessionId = generateSessionId();
+    } while (sessions_.find(sessionId) != sessions_.end());
+    
+    auto session = std::make_shared<Session>(sessionId);
+    session->setExpirationTime(defaultExpiration_);
+    sessions_[sessionId] = session;
+    return session;
 }
 
 std::shared_ptr<Session> SessionManager::createSession(const std::string& sessionId) {
@@ -153,8 +162,7 @@ void SessionManager::cleanupThreadFunction() {
     }
 }
 
-std::string SessionManager::generateUniqueSessionId() {
-    // 生成唯一的会话ID
+std::string SessionManager::generateSessionId() {
     auto now = std::chrono::system_clock::now();
     auto timestamp = std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()).count();
     
@@ -164,21 +172,10 @@ std::string SessionManager::generateUniqueSessionId() {
     
     std::stringstream ss;
     ss << std::hex << timestamp;
-    
-    // 添加随机字符
     for (int i = 0; i < 16; ++i) {
         ss << dis(gen);
     }
-    
-    std::string sessionId = ss.str();
-    
-    // 确保ID唯一性
-    std::lock_guard<std::mutex> lock(sessionsMutex_);
-    while (sessions_.find(sessionId) != sessions_.end()) {
-        sessionId += std::to_string(dis(gen));
-    }
-    
-    return sessionId;
+    return ss.str();
 }
 
 } // namespace session
