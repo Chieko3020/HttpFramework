@@ -465,8 +465,13 @@ void HttpServer::handleRead(int clientFd, int subReactorIndex) {
     if (request->parse(ctxPtr->getData())) {
         auto response = std::make_shared<HttpResponse>();
         // 只消费已解析的请求数据，保留缓冲区中可能的下一个请求（解决 TCP 粘包）
-        size_t consumed = request->getHeaderEnd() + request->getHeaderEndSepLen()
-                          + request->getContentLength();
+        size_t consumed = request->getHeaderEnd() + request->getHeaderEndSepLen();
+        size_t contentLength = request->getContentLength();
+        if (contentLength > 0) {
+            consumed += contentLength;
+        } else {
+            consumed += request->getRawBodySize();  // chunked 或无 body
+        }
         ctxPtr->consumeData(consumed);
 
         auto task = std::make_shared<HttpRequestTask>(

@@ -66,6 +66,7 @@ public:
     // 获取头部结束位置（用于计算已消费数据量，解决粘包问题）
     size_t getHeaderEnd() const { return headerEnd_; }
     size_t getHeaderEndSepLen() const { return headerEndSepLen_; }
+    size_t getRawBodySize() const { return rawBodySize_; }  // chunked 解码前原始 body 大小
     
     // 获取Content-Type
     std::string getContentType() const;
@@ -88,6 +89,7 @@ private:
     std::string rawRequest_;
     size_t headerEnd_ = 0;
     size_t headerEndSepLen_ = 0;  // 分隔符长度：\r\n\r\n=4, \n\n=2
+    size_t rawBodySize_ = 0;      // chunked 解码前原始 body 大小
     
     // 解析请求行
     bool parseRequestLine(const std::string& line);
@@ -106,6 +108,9 @@ private:
     
     // URL解码
     std::string urlDecode(const std::string& str);
+    
+    // chunked transfer encoding 解码
+    bool decodeChunkedBody();
 };
 
 } // namespace http
