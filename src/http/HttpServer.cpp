@@ -325,6 +325,7 @@ void HttpServer::handleAccept() {
         int clientFd = accept(listenFd_, (struct sockaddr*)&clientAddr, &clientAddrLen);
         if (clientFd < 0) {
             if (errno == EAGAIN || errno == EWOULDBLOCK) break;
+            if (errno == EINTR) continue;
             std::cerr << "[ERROR][HTTP服务器]：accept错误: " << strerror(errno) << std::endl;
             break;
         }
@@ -628,6 +629,7 @@ std::string HttpServer::readAllData(int fd) {
             break;
         } else {
             if (errno == EAGAIN || errno == EWOULDBLOCK) break;
+            if (errno == EINTR) continue;
             std::cerr << "[ERROR][HTTP服务器]：读取错误: " << strerror(errno) << std::endl;
             break;
         }
@@ -663,6 +665,7 @@ bool HttpServer::writeAllDataFromOffset(int fd, const std::string& data,
                 if (bytesWritten) *bytesWritten = totalWritten - offset;
                 return false;
             }
+            if (errno == EINTR) continue;
             std::cerr << "[ERROR][HTTP服务器]：写入错误: " << strerror(errno) << std::endl;
             if (bytesWritten) *bytesWritten = totalWritten - offset;
             return false;
