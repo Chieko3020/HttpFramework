@@ -46,22 +46,30 @@ bool HttpRequest::parse(const std::string& rawRequest) {
     // 解析请求体
     // 查找头部和body之间的空行分隔符
     size_t headerEnd = rawRequest.find("\r\n\r\n");
-    if (headerEnd == std::string::npos) {
-        headerEnd = rawRequest.find("\n\n");
-    }
-    
+    size_t bodyStart;
     if (headerEnd != std::string::npos) {
-        // 提取body部分
-        body_ = rawRequest.substr(headerEnd + 4); // 跳过 "\r\n\r\n" 或 "\n\n"
-        
-        // 移除body末尾的换行符
-        while (!body_.empty() && (body_.back() == '\r' || body_.back() == '\n')) {
-            body_.pop_back();
+        bodyStart = headerEnd + 4;  // 跳过 "\r\n\r\n"
+    } else {
+        headerEnd = rawRequest.find("\n\n");
+        if (headerEnd != std::string::npos) {
+            bodyStart = headerEnd + 2;  // 跳过 "\n\n"
+        } else {
+            bodyStart = std::string::npos;
         }
+    }
+
+    if (bodyStart != std::string::npos) {
+        body_ = rawRequest.substr(bodyStart);
     } else {
         body_ = "";
     }
-    
+
+    // 校验 Content-Length：body 必须完整接收
+    size_t contentLength = getContentLength();
+    if (contentLength > 0 && body_.size() < contentLength) {
+        return false;
+    }
+
     return true;
 }
 
