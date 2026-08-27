@@ -20,8 +20,8 @@ HttpServer::HttpServer(int port, size_t threadPoolSize, size_t subReactorCount)
         subReactorCount = 1;
     subReactorCount_ = subReactorCount;
 
-    threadPool_ = new utils::ThreadPool(threadPoolSize);
-    ownsThreadPool_ = true;
+    ownedPool_ = std::make_unique<utils::ThreadPool>(threadPoolSize);
+    threadPool_ = ownedPool_.get();
 
     std::cout << "[INFO][HTTP服务器]：初始化完成, port=" << port
               << " 配置:" << subReactorCount_ << " 子Reactor"
@@ -38,7 +38,6 @@ HttpServer::HttpServer(int port, utils::ThreadPool& threadPool, size_t subReacto
     subReactorCount_ = subReactorCount;
 
     threadPool_ = &threadPool;
-    ownsThreadPool_ = false;
     threadPoolSize_ = threadPool.getThreadCount();
 
     std::cout << "[INFO][HTTP服务器]：初始化完成, port=" << port
@@ -57,9 +56,9 @@ bool HttpServer::start() {
     }
 
     // 如果线程池已被 shutdown（例如 stop() 后重启），重新创建（仅自拥有池）
-    if (threadPool_ && !threadPool_->isRunning() && ownsThreadPool_) {
-        delete threadPool_;
-        threadPool_ = new utils::ThreadPool(threadPoolSize_);
+    if (threadPool_ && !threadPool_->isRunning() && ownedPool_) {
+        ownedPool_.reset(new utils::ThreadPool(threadPoolSize_));
+        threadPool_ = ownedPool_.get();
     }
 
     if (!initializeServer()) {
@@ -129,9 +128,9 @@ void HttpServer::stop() {
     }
 
     // 关闭线程池（仅当自拥有时，共享池由 App 管理生命周期）
-    if (threadPool_ && ownsThreadPool_) {
+    if (ownedPool_) {
         threadPool_->shutdown();
-        delete threadPool_;
+        ownedPool_.reset();
         threadPool_ = nullptr;
     }
 
