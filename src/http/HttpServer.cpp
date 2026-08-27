@@ -275,6 +275,7 @@ void HttpServer::handleAccept() {
         int clientFd = accept(listenFd_, (struct sockaddr*)&clientAddr, &clientAddrLen);
         if (clientFd < 0) {
             if (errno == EAGAIN || errno == EWOULDBLOCK) break;
+            if (errno == EINTR) continue;
             std::cerr << "accept error: " << strerror(errno) << std::endl;
             break;
         }
@@ -384,10 +385,38 @@ void HttpServer::handleRead(int clientFd, int subReactorIndex) {
 
     ctxPtr->appendData(data);
 
+    // 内存池缓冲区满，请求体被截断
+    if (ctxPtr->isTruncated()) {
+        std::cerr << "[ERROR]：请求体超过内存池缓冲区上限" << std::endl;
+        auto response = std::make_shared<HttpResponse>();
+        response->setStatus(413, "Payload Too Large");
+        response->setBody("{\"error\":\"Payload too large\"}");
+        response->setHeader("Content-Type", "application/json");
+        auto task = std::make_shared<HttpRequestTask>(
+            clientFd, std::make_shared<HttpRequest>(), response,
+            [this, subReactorIndex](int fd, std::shared_ptr<HttpRequest> req,
+                                     std::shared_ptr<HttpResponse> res) {
+                processHttpRequest(subReactorIndex, fd, req, res);
+            }
+        );
+        threadPool_->enqueue([task]() {
+            task->execute();
+        });
+        return;
+    }
+
     auto request = std::make_shared<HttpRequest>();
     if (request->parse(ctxPtr->getData())) {
         auto response = std::make_shared<HttpResponse>();
-        ctxPtr->clearData();
+        // 只消费已解析的请求数据，保留缓冲区中可能的下一个请求（解决 TCP 粘包）
+        size_t consumed = request->getHeaderEnd() + request->getHeaderEndSepLen();
+        size_t contentLength = request->getContentLength();
+        if (contentLength > 0) {
+            consumed += contentLength;
+        } else {
+            consumed += request->getRawBodySize();  // chunked 或无 body
+        }
+        ctxPtr->consumeData(consumed);
 
         auto task = std::make_shared<HttpRequestTask>(
             clientFd, request, response,
@@ -541,6 +570,7 @@ std::string HttpServer::readAllData(int fd) {
             break;
         } else {
             if (errno == EAGAIN || errno == EWOULDBLOCK) break;
+            if (errno == EINTR) continue;
             std::cerr << "Read error: " << strerror(errno) << std::endl;
             break;
         }
@@ -576,6 +606,7 @@ bool HttpServer::writeAllDataFromOffset(int fd, const std::string& data,
                 if (bytesWritten) *bytesWritten = totalWritten - offset;
                 return false;
             }
+            if (errno == EINTR) continue;
             std::cerr << "Write error: " << strerror(errno) << std::endl;
             if (bytesWritten) *bytesWritten = totalWritten - offset;
             return false;

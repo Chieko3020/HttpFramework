@@ -2,6 +2,7 @@
 #include <sstream>
 #include <algorithm>
 #include <cctype>
+#include <cstdlib>
 #include <iomanip>
 
 namespace http {
@@ -48,11 +49,15 @@ bool HttpRequest::parse(const std::string& rawRequest) {
     size_t headerEnd = rawRequest.find("\r\n\r\n");
     size_t bodyStart;
     if (headerEnd != std::string::npos) {
-        bodyStart = headerEnd + 4;  // 跳过 "\r\n\r\n"
+        headerEnd_ = headerEnd;
+        headerEndSepLen_ = 4;
+        bodyStart = headerEnd + 4;
     } else {
         headerEnd = rawRequest.find("\n\n");
         if (headerEnd != std::string::npos) {
-            bodyStart = headerEnd + 2;  // 跳过 "\n\n"
+            headerEnd_ = headerEnd;
+            headerEndSepLen_ = 2;
+            bodyStart = headerEnd + 2;
         } else {
             bodyStart = std::string::npos;
         }
@@ -64,12 +69,62 @@ bool HttpRequest::parse(const std::string& rawRequest) {
         body_ = "";
     }
 
-    // 校验 Content-Length：body 必须完整接收
-    size_t contentLength = getContentLength();
-    if (contentLength > 0 && body_.size() < contentLength) {
-        return false;
+    // 记录原始 body 大小（chunked 解码前）
+    rawBodySize_ = body_.size();
+
+    // 检测 Transfer-Encoding: chunked
+    bool isChunked = (getHeader("transfer-encoding").find("chunked") != std::string::npos);
+
+    if (isChunked) {
+        // chunked 结束标记 "0\r\n\r\n"
+        if (body_.size() < 5 || body_.substr(body_.size() - 5) != "0\r\n\r\n") {
+            return false;  // 未收齐
+        }
+        if (!decodeChunkedBody()) {
+            return false;
+        }
+    } else {
+        // Content-Length 校验
+        size_t contentLength = getContentLength();
+        if (contentLength > 0 && body_.size() < contentLength) {
+            return false;
+        }
     }
 
+    return true;
+}
+
+bool HttpRequest::decodeChunkedBody() {
+    std::string decoded;
+    size_t pos = 0;
+
+    while (pos < body_.size()) {
+        size_t lineEnd = body_.find("\r\n", pos);
+        if (lineEnd == std::string::npos) return false;
+
+        std::string sizeStr = body_.substr(pos, lineEnd - pos);
+        size_t semiPos = sizeStr.find(';');
+        if (semiPos != std::string::npos) {
+            sizeStr = sizeStr.substr(0, semiPos);
+        }
+
+        char* end;
+        long chunkSize = std::strtol(sizeStr.c_str(), &end, 16);
+        if (*end != '\0') return false;
+
+        pos = lineEnd + 2;
+
+        if (chunkSize == 0) {
+            break;
+        }
+
+        if (pos + chunkSize + 2 > body_.size()) return false;
+
+        decoded.append(body_.substr(pos, chunkSize));
+        pos += chunkSize + 2;
+    }
+
+    body_ = std::move(decoded);
     return true;
 }
 

@@ -168,12 +168,17 @@ std::shared_ptr<DbConnection> DbConnectionPool::createConnection() {
 }
 
 void DbConnectionPool::healthCheckLoop() {
+    std::unique_lock<std::mutex> lock(mutex_);
     while (healthCheckRunning_) {
-        std::this_thread::sleep_for(std::chrono::seconds(30)); // 每30秒检查一次
-        
+        if (condition_.wait_for(lock, std::chrono::seconds(30),
+            [this] { return !healthCheckRunning_; })) {
+            break;
+        }
+        lock.unlock();
         if (healthCheckRunning_) {
             healthCheck();
         }
+        lock.lock();
     }
 }
 

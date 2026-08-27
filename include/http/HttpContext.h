@@ -43,6 +43,7 @@ public:
     void appendData(const char* data, size_t len);
     std::string getData() const;
     void clearData();
+    void consumeData(size_t n);  // 只消费前 n 字节，保留剩余数据
 
     // 响应数据管理 - 支持内存池和传统方式
     void setResponseData(const std::string& data);
@@ -61,6 +62,9 @@ public:
     size_t getWriteOffset() const { return writeOffset_; }
     void setWriteOffset(size_t offset) { writeOffset_ = offset; }
     bool hasMoreDataToWrite() const;
+
+    // 截断检测（内存池缓冲区满时）
+    bool isTruncated() const { return truncated_; }
 
 private:
     HttpRequest request_;
@@ -83,6 +87,7 @@ private:
     
     // 写入进度跟踪
     size_t writeOffset_;
+    bool truncated_ = false;
 };
 
 } // namespace http

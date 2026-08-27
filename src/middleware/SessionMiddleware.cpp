@@ -31,11 +31,6 @@ void SessionMiddleware::operator()(const http::HttpRequest& request, http::HttpR
     
     // 继续处理请求
     next();
-    
-    // 如果会话被修改，更新Cookie
-    if (session && session->isValid()) {
-        setSessionCookie(response, session->getId(), session->getExpirationTime());
-    }
 }
 
 std::string SessionMiddleware::extractSessionId(const http::HttpRequest& request) {

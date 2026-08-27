@@ -32,7 +32,7 @@ public:
     void removeSession(const std::string& sessionId);
     
     // 检查会话是否存在
-    bool hasSession(const std::string& sessionId) const;
+    bool hasSession(const std::string& sessionId);
     
     // 获取所有会话
     std::vector<std::shared_ptr<Session>> getAllSessions() const;
@@ -67,7 +67,7 @@ private:
     void cleanupThreadFunction();
     
     // 生成唯一的会话ID
-    std::string generateUniqueSessionId();
+    std::string generateSessionId();
 };
 
 } // namespace session
