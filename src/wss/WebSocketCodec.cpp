@@ -182,8 +182,8 @@ std::vector<uint8_t> WebSocketCodec::buildClientFrame(uint8_t opcode,
 
     uint8_t mask_key[4];
     if (RAND_bytes(mask_key, 4) != 1) {
-        mask_key[0] = 0x12; mask_key[1] = 0x34;
-        mask_key[2] = 0x56; mask_key[3] = 0x78;
+        std::cerr << "[ERROR][WebSocket]：RAND_bytes 生成掩码失败" << std::endl;
+        return {};
     }
     for (int i = 0; i < 4; ++i) out.push_back(mask_key[i]);
     for (std::size_t i = 0; i < payload.size(); ++i)
