@@ -7,6 +7,7 @@
 #include <openssl/rand.h>
 #include <openssl/sha.h>
 
+#include <mutex>
 #include <algorithm>
 #include <chrono>
 #include <cstdlib>
@@ -80,7 +81,9 @@ bool WebSocketStreamParser::shouldEnforceNonce() {
 }
 
 bool WebSocketStreamParser::acceptNonce(const std::string& nonce) {
+    static std::mutex mutex;
     static std::unordered_map<std::string, uint64_t> seen;
+    std::lock_guard<std::mutex> lock(mutex);
     uint64_t now = static_cast<uint64_t>(
         std::chrono::duration_cast<std::chrono::seconds>(
             std::chrono::system_clock::now().time_since_epoch())
