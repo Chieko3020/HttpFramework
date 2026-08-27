@@ -59,11 +59,12 @@ void SessionManager::removeSession(const std::string& sessionId) {
     sessions_.erase(sessionId);
 }
 
-bool SessionManager::hasSession(const std::string& sessionId) const {
+bool SessionManager::hasSession(const std::string& sessionId) {
     std::lock_guard<std::mutex> lock(sessionsMutex_);
     auto it = sessions_.find(sessionId);
     if (it != sessions_.end()) {
         if (it->second->isExpired()) {
+            sessions_.erase(it);
             return false;
         }
         return true;
