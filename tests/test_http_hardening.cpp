@@ -13,6 +13,7 @@
 //
 // 断言的口径都来自"客户端可观测行为"，不依赖内部实现细节。
 
+#include "HttpFramework.h"   // H15：App 级统计/信号
 #include "http/HttpServer.h"
 #include "router/Router.h"
 #include "utils/SocketCompat.h"
@@ -848,6 +849,50 @@ static bool test_router_dynamic_registration() {
     return true;
 }
 
+// ── H15：App::stats() 必须反映真实统计 ──
+static bool test_app_stats_and_signal() {
+    TEST("H15 App::stats() 反映真实请求数；SIGTERM 由主循环完成关闭");
+    const int port = pickPort();
+    http::App app;
+    app.get("/x", [](const http::HttpRequest&, http::HttpResponse& res) { res.setText("X"); });
+
+    std::atomic<bool> returned{false};
+    std::thread t([&]() {
+        try { app.start(port, 2); } catch (...) {}
+        returned.store(true);
+    });
+
+    int s = -1;
+    for (int i = 0; i < 200 && s < 0; ++i) {
+        s = connectTo(port, 500);
+        if (s < 0) std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    }
+    CHECK(s >= 0, "App 未在 4s 内开始监听");
+    CHECK(sendAll(s, req("GET", "/x")), "发送失败");
+    auto r = readResponse(s, 3000);
+    close(s);
+    CHECK(r.complete && r.body == "X", "App 路由响应异常: " << r.status);
+
+    uint64_t total = 0;
+    for (int i = 0; i < 100; ++i) {
+        total = app.stats().totalRequests.load();
+        if (total >= 1) break;
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    }
+    std::cout << "(App::stats().totalRequests=" << total << ") ";
+    CHECK(total >= 1, "App::stats() 恒为 0（未转发到 HttpServer 的真实统计）");
+
+    // 信号关闭：处理器只置标志，关闭在主循环完成
+    raise(SIGTERM);
+    for (int i = 0; i < 400 && !returned.load(); ++i)
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    std::cout << "(SIGTERM 后 start 返回=" << (returned.load() ? "是" : "否") << ") ";
+    CHECK(returned.load(), "收到 SIGTERM 后 App::start() 未在 8s 内返回");
+    t.join();
+    PASS();
+    return true;
+}
+
 int main() {
     std::cout << "=== test_http_hardening ===" << std::endl;
     ignoreSigpipeInTest();
@@ -871,6 +916,7 @@ int main() {
     run(test_pool_exhaustion_reported, "H8 池耗尽显式上报");
     run(test_head_semantics,          "H13 HEAD 语义");
     run(test_router_dynamic_registration, "H14 路由运行期注册");
+    run(test_app_stats_and_signal,    "H15 App 统计与信号");
 
     std::cout << std::endl
               << "结果: " << g_testsPassed << " 通过, "
