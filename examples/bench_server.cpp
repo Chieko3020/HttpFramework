@@ -15,6 +15,7 @@
 
 #include "HttpFramework.h"
 #include "utils/TemplateLoader.h"
+#include "utils/MemoryPool.h"
 
 #include <iostream>
 #include <fstream>
@@ -153,7 +154,14 @@ int main(int argc, char* argv[]) {
     // ── 健康检查 ──────────────────────────────────────────
 
     app.get("/stats", [](const http::HttpRequest&, http::HttpResponse& res) {
-        res.setJson(R"({"status":"ok"})");
+        // 附带内存池统计：alloc/dealloc 调用次数用于评估池的实际使用频率
+        auto& pool = utils::GlobalMemoryPool::getInstance();
+        res.setJson(std::string(R"({"status":"ok","mempool":{"alloc_calls":)") +
+                    std::to_string(pool.allocCalls()) +
+                    R"(,"dealloc_calls":)" + std::to_string(pool.deallocCalls()) +
+                    R"(,"used_blocks":)" + std::to_string(pool.getUsedBlocks()) +
+                    R"(,"total_blocks":)" + std::to_string(pool.getTotalBlocks()) +
+                    R"(}})");
     });
 
     // ── 额外路由 (B3: 路由扩展性) ─────────────────────────

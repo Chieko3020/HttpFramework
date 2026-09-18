@@ -4,6 +4,8 @@
 #include <queue>
 #include <mutex>
 #include <memory>
+#include <atomic>
+#include <cstdint>
 #include <cstring>
 
 namespace utils {
@@ -32,6 +34,11 @@ public:
     // 释放内存块
     void deallocate(MemoryBlock* block);
     
+    // 分配/释放调用次数：用于评估池在真实负载下的使用频率
+    // （若远小于请求数，说明连接级 buffer 复用已经消除了分配压力）
+    uint64_t allocCalls() const { return allocCalls_.load(std::memory_order_relaxed); }
+    uint64_t deallocCalls() const { return deallocCalls_.load(std::memory_order_relaxed); }
+
     // 获取统计信息
     size_t getTotalBlocks() const { return blocks_.size(); }
     size_t getUsedBlocks() const { return usedBlocks_; }
@@ -45,6 +52,8 @@ private:
     std::queue<MemoryBlock*> freeBlocks_;
     std::mutex mutex_;
     size_t usedBlocks_;
+    std::atomic<uint64_t> allocCalls_{0};
+    std::atomic<uint64_t> deallocCalls_{0};
     
     void initializePool(size_t poolSize);
 };

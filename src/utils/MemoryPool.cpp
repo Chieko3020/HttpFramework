@@ -29,6 +29,7 @@ void HttpMemoryPool::initializePool(size_t poolSize) {
 }
 
 MemoryBlock* HttpMemoryPool::allocate() {
+    allocCalls_.fetch_add(1, std::memory_order_relaxed);
     std::lock_guard<std::mutex> lock(mutex_);
     
     if (freeBlocks_.empty()) {
@@ -46,6 +47,7 @@ MemoryBlock* HttpMemoryPool::allocate() {
 
 void HttpMemoryPool::deallocate(MemoryBlock* block) {
     if (block == nullptr) return;
+    deallocCalls_.fetch_add(1, std::memory_order_relaxed);
     
     std::lock_guard<std::mutex> lock(mutex_);
     
