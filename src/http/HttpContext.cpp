@@ -93,6 +93,15 @@ std::string HttpContext::getData() const {
     }
 }
 
+size_t HttpContext::requestBufferCapacity() const {
+    if (useMemoryPool_) {
+        return requestBuffer_ ? requestBuffer_->size()
+                              : utils::HttpMemoryPool::BLOCK_SIZE;
+    }
+    // 非池模式没有固定块容量，返回 0 表示"仅受 HttpServer 的请求缓冲上限约束"
+    return 0;
+}
+
 void HttpContext::clearData() {
     if (useMemoryPool_) {
         if (requestBuffer_) {
@@ -117,17 +126,20 @@ void HttpContext::consumeData(size_t n) {
     }
 }
 
-void HttpContext::enableMemoryPool(bool enable) {
-    if (useMemoryPool_ == enable) {
+void HttpContext::enableMemoryPool(bool enable, utils::HttpMemoryPool* pool) {
+    if (useMemoryPool_ == enable && (!enable || pool == nullptr || memoryPool_ == pool)) {
         return;  // 状态没有变化
     }
     
     useMemoryPool_ = enable;
     
     if (enable) {
-        // 延迟初始化全局内存池 (避免未使用时分配 60MB)
+        // 指定池优先（HttpServer 自持的池，块容量可配置）；
+        // 未指定时回退到进程级全局池（避免未使用时分配 60MB）
+        memoryPool_ = pool ? pool : &utils::GlobalMemoryPool::getInstance();
         if (!memoryPool_) {
-            memoryPool_ = &utils::GlobalMemoryPool::getInstance();
+            useMemoryPool_ = false;
+            return;
         }
         // 从传统模式切换到内存池模式
         if (!buffer_.empty()) {

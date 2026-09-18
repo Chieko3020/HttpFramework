@@ -55,8 +55,14 @@ public:
 
     void setRouter(std::shared_ptr<router::Router> router);
 
-    void enableMemoryPool(bool enable = true);
+    // 启用内存池。blockSizeBytes / poolBlocks 为 0 时用默认值（12KB / 5000 块）。
+    // 必须在 start() 之前调用：池是进程级单例，运行期改参数会让新旧连接
+    // 使用不同块容量（H7/L12）。
+    void enableMemoryPool(bool enable = true, size_t blockSizeBytes = 0,
+                          size_t poolBlocks = 0);
     bool isMemoryPoolEnabled() const { return useMemoryPool_; }
+    // 内存池单块容量（即内存池模式下单连接请求的上限）；0 = 未启用/默认
+    size_t memoryPoolBlockSize() const { return memoryPoolBlockSize_; }
 
     // 空闲连接超时（秒）；<=0 表示不启用超时清理
     void setIdleTimeout(int seconds) { idleTimeoutSec_ = seconds; }
@@ -137,6 +143,12 @@ private:
 
     // 内存池配置
     bool useMemoryPool_;
+    size_t memoryPoolBlockSize_{0};  // 0 = 默认 12KB
+    size_t memoryPoolBlocks_{0};     // 0 = 默认 5000 块
+    // 本 server 自持的内存池实例（启用内存池时在 initializeServer 里创建）。
+    // 用自持实例而不是进程级单例：块容量/块数因此可以按 server 配置，
+    // 也不会出现"另一个 server 先创建了全局池导致我的参数被忽略"。
+    std::unique_ptr<utils::HttpMemoryPool> ownedMemoryPool_;
 
     // 空闲连接超时（秒）
     int idleTimeoutSec_{60};

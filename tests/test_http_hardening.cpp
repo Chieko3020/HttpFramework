@@ -180,13 +180,14 @@ struct Fixture {
 
     bool up(int idleSec = 60, size_t subReactors = 1, bool pool_ = false,
             size_t workers = 4,
-            std::function<void(router::Router&)> extra = nullptr) {
+            std::function<void(router::Router&)> extra = nullptr,
+            size_t poolBlockBytes = 0) {
         port = pickPort();
         if (port == 0) return false;
         pool = std::make_unique<utils::ThreadPool>(workers);
         server = std::make_unique<http::HttpServer>(port, *pool, subReactors);
         server->setIdleTimeout(idleSec);
-        if (pool_) server->enableMemoryPool(true);
+        if (pool_) server->enableMemoryPool(true, poolBlockBytes);
 
         auto r = std::make_shared<router::Router>();
         r->get("/small", [](const http::HttpRequest&, http::HttpResponse& res) {
@@ -650,6 +651,42 @@ static bool test_slow_handler_not_killed_by_timer() {
     return true;
 }
 
+// ── H7：内存池模式下的单连接上限可配置，且超限时 413 可区分 ──
+static bool test_pool_limit_configurable() {
+    TEST("H7 内存池块容量可配置(4096)，超限 413 带 limit，未超限正常");
+    Fixture f;
+    if (!f.up(60, 1, /*pool=*/true, 4, nullptr, /*poolBlockBytes=*/4096))
+        FAIL("服务器启动失败");
+
+    CHECK(f.server->memoryPoolBlockSize() == 4096,
+          "块容量应为 4096, 实际 " << f.server->memoryPoolBlockSize());
+
+    // 5000 字节 body > 4096 → 必须 413，且响应体给出可区分的上限
+    int s = connectTo(f.port);
+    CHECK(s >= 0, "连接失败");
+    CHECK(sendAll(s, req("POST", "/echo", "", std::string(5000, 'A'))), "发送失败");
+    auto r = readResponse(s, 8000);
+    CHECK(r.complete, "413 响应未收到");
+    CHECK(r.status.rfind("HTTP/1.1 413", 0) == 0, "应返回 413, 实际: " << r.status);
+    CHECK(r.body.find("\"limit\":4096") != std::string::npos,
+          "413 响应体应给出可区分的上限(limit:4096), 实际: " << r.body);
+    close(s);
+
+    // 同一配置下 2000 字节正常通过：证明上限确实来自配置而不是恒定 12KB
+    int s2 = connectTo(f.port);
+    CHECK(s2 >= 0, "连接失败");
+    CHECK(sendAll(s2, req("POST", "/echo", "", std::string(2000, 'B'))), "发送失败");
+    auto r2 = readResponse(s2, 8000);
+    CHECK(r2.complete && r2.status.rfind("HTTP/1.1 200", 0) == 0,
+          "2000 字节请求应正常, 实际: " << r2.status);
+    CHECK(r2.body == std::string(2000, 'B'), "echo 体异常, size=" << r2.body.size());
+    close(s2);
+
+    f.down();
+    PASS();
+    return true;
+}
+
 int main() {
     std::cout << "=== test_http_hardening ===" << std::endl;
     ignoreSigpipeInTest();
@@ -669,6 +706,7 @@ int main() {
     run(test_stale_fd_no_crosstalk,   "C2 陈旧 fd 防误杀");
     run(test_stop_waits_for_inflight, "H3 stop 排空在途任务");
     run(test_slow_handler_not_killed_by_timer, "H4 慢 handler 不被误杀");
+    run(test_pool_limit_configurable, "H7 内存池上限可配置");
 
     std::cout << std::endl
               << "结果: " << g_testsPassed << " 通过, "

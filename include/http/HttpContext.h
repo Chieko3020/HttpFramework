@@ -55,8 +55,12 @@ public:
     void clearData();
     void consumeData(size_t n);  // 只消费前 n 字节，保留剩余数据
 
-    // 内存池管理
-    void enableMemoryPool(bool enable = true);
+    // 请求缓冲容量（内存池模式下即池的单块容量）；用于在 413 里给出可区分的上限（H7）
+    size_t requestBufferCapacity() const;
+
+    // 内存池管理。pool 为 nullptr 时使用进程级全局池（向后兼容）；
+    // HttpServer 启用内存池时会传入自己持有的池实例，使块容量可配置（H7）
+    void enableMemoryPool(bool enable = true, utils::HttpMemoryPool* pool = nullptr);
     bool isMemoryPoolEnabled() const { return useMemoryPool_; }
     
     // 获取内存池统计信息

@@ -4,8 +4,12 @@
 
 namespace utils {
 
-HttpMemoryPool::HttpMemoryPool(size_t poolSize) 
-    : usedBlocks_(0) {
+HttpMemoryPool::HttpMemoryPool(size_t poolSize, size_t blockSize)
+    : blockSize_(0), usedBlocks_(0) {
+    if (poolSize == 0) poolSize = DEFAULT_POOL_SIZE;
+    if (blockSize < MIN_BLOCK_SIZE) blockSize = MIN_BLOCK_SIZE;
+    if (blockSize > BLOCK_SIZE) blockSize = BLOCK_SIZE;
+    blockSize_ = blockSize;
     initializePool(poolSize);
 }
 
@@ -19,13 +23,13 @@ void HttpMemoryPool::initializePool(size_t poolSize) {
     // 预分配所有内存块
     blocks_.reserve(poolSize);
     for (size_t i = 0; i < poolSize; ++i) {
-        auto block = std::make_unique<MemoryBlock>(i);
+        auto block = std::make_unique<MemoryBlock>(i, blockSize_);
         freeBlocks_.push(block.get());
         blocks_.push_back(std::move(block));
     }
     
     std::cout << "[INFO][内存池]：初始化完成, 块数=" << poolSize 
-              << " 块, 每块 " << BLOCK_SIZE << " 字节" << std::endl;
+              << " 块, 每块 " << blockSize_ << " 字节" << std::endl;
 }
 
 MemoryBlock* HttpMemoryPool::allocate() {
@@ -33,7 +37,13 @@ MemoryBlock* HttpMemoryPool::allocate() {
     std::lock_guard<std::mutex> lock(mutex_);
     
     if (freeBlocks_.empty()) {
-        std::cerr << "[WARN][内存池]：无空闲块可用" << std::endl;
+        // 池耗尽：显式计数并报错（调用方据此走 503/500，而不是静默"永远写不进"）（H8）
+        uint64_t fails = allocateFailures_.fetch_add(1, std::memory_order_relaxed) + 1;
+        // 只打印前若干次与之后每 1000 次，避免刷爆日志
+        if (fails <= 5 || fails % 1000 == 0) {
+            std::cerr << "[ERROR][内存池]：无空闲块可用（池耗尽）, 累计失败=" << fails
+                      << " 块数=" << blocks_.size() << std::endl;
+        }
         return nullptr;
     }
     
@@ -83,8 +93,11 @@ void HttpMemoryPool::reset() {
 PooledBuffer::PooledBuffer(HttpMemoryPool* pool) 
     : pool_(pool), block_(nullptr), usedSize_(0) {
     block_ = pool_->allocate();
-    if (block_) {
-        std::memset(block_->data, 0, BLOCK_SIZE);
+    // 不在构造期整块清零（H8）：写入按 usedSize_ 定位、读取以 usedSize_ 为界，
+    // 没有"读未清零区域"的路径；每连接一次 12KB memset 在高并发下是纯浪费。
+    if (!block_) {
+        std::cerr << "[ERROR][内存池]：缓冲区分配失败（池耗尽），该连接将无法写入数据"
+                  << std::endl;
     }
 }
 
@@ -124,7 +137,7 @@ PooledBuffer& PooledBuffer::operator=(PooledBuffer&& other) noexcept {
 size_t PooledBuffer::write(const char* src, size_t len) {
     if (!block_ || !src) return 0;
     
-    size_t availableSpace = BLOCK_SIZE - usedSize_;
+    size_t availableSpace = block_->capacity - usedSize_;
     size_t bytesToWrite = std::min(len, availableSpace);
     
     std::memcpy(block_->data + usedSize_, src, bytesToWrite);
@@ -172,6 +185,48 @@ void PooledBuffer::consume(size_t n) {
     size_t remaining = usedSize_ - n;
     std::memmove(block_->data, block_->data + n, remaining);
     usedSize_ = remaining;
+}
+
+
+// ── 全局内存池（H7：容量参数可配置，但只能在创建前设定）──
+
+namespace {
+std::mutex g_globalPoolMutex;
+std::unique_ptr<HttpMemoryPool> g_globalPool;
+
+HttpMemoryPool* globalPoolRaw() {
+    std::lock_guard<std::mutex> lk(g_globalPoolMutex);
+    return g_globalPool.get();
+}
+}  // namespace
+
+HttpMemoryPool& GlobalMemoryPool::getInstance() {
+    std::lock_guard<std::mutex> lk(g_globalPoolMutex);
+    if (!g_globalPool) {
+        g_globalPool = std::make_unique<HttpMemoryPool>();
+    }
+    return *g_globalPool;
+}
+
+bool GlobalMemoryPool::configure(size_t poolSize, size_t blockSize) {
+    std::lock_guard<std::mutex> lk(g_globalPoolMutex);
+    if (g_globalPool) {
+        if (poolSize == 0 || blockSize == 0 ||
+            (g_globalPool->getTotalBlocks() == poolSize &&
+             g_globalPool->blockSize() == blockSize)) {
+            return true;  // 参数相同：幂等
+        }
+        std::cerr << "[WARN][内存池]：内存池已创建，configure(poolSize=" << poolSize
+                  << ", blockSize=" << blockSize
+                  << ") 被忽略（必须在首次使用前配置）" << std::endl;
+        return false;
+    }
+    g_globalPool = std::make_unique<HttpMemoryPool>(poolSize, blockSize);
+    return true;
+}
+
+bool GlobalMemoryPool::isCreated() {
+    return globalPoolRaw() != nullptr;
 }
 
 } // namespace utils

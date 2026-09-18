@@ -75,6 +75,7 @@ bool HttpServer::start() {
         threadPool_ = ownedPool_.get();
     }
 
+
     if (!initializeServer()) {
         return false;
     }
@@ -159,6 +160,9 @@ void HttpServer::stop() {
         std::lock_guard<std::mutex> lock(connMutex_);
         conns_.clear();
     }
+
+    // 连接表已清空（所有 PooledBuffer 均已归还），此时才能销毁自持内存池
+    ownedMemoryPool_.reset();
 
     if (wasRunning) {
         std::cout << "[INFO][HTTP服务器]：服务已停止" << std::endl;
@@ -263,6 +267,13 @@ bool HttpServer::initializeServer() {
         std::cerr << "[ERROR][HTTP服务器]：监听失败: " << strerror(errno) << std::endl;
         close(listenFd_);
         return false;
+    }
+
+    // 内存池：由本 server 自持，块容量/块数在启动时落定（H7/L12）
+    if (useMemoryPool_) {
+        ownedMemoryPool_ = std::make_unique<utils::HttpMemoryPool>(
+            memoryPoolBlocks_ ? memoryPoolBlocks_ : utils::HttpMemoryPool::DEFAULT_POOL_SIZE,
+            memoryPoolBlockSize_ ? memoryPoolBlockSize_ : utils::HttpMemoryPool::BLOCK_SIZE);
     }
 
     // 初始化主 epoll（仅监听 listenFd_）
@@ -399,9 +410,27 @@ void HttpServer::setRouter(std::shared_ptr<router::Router> router) {
     router_ = router;
 }
 
-void HttpServer::enableMemoryPool(bool enable) {
+void HttpServer::enableMemoryPool(bool enable, size_t blockSizeBytes, size_t poolBlocks) {
+    if (running_.load()) {
+        // 池参数是进程级/连接级的静态配置，运行期变更会造成"新旧连接块大小不一致"，
+        // 这类差异极难复现。宁可显式拒绝并提示（H7/L12）。
+        std::cerr << "[WARN][HTTP服务器]：服务已在运行，enableMemoryPool 被忽略"
+                     "（必须在 start() 之前调用）" << std::endl;
+        return;
+    }
     useMemoryPool_ = enable;
-    std::cout << "[INFO][HTTP服务器]：内存池已" << (enable ? "启用" : "禁用") << std::endl;
+    if (blockSizeBytes > 0) {
+        memoryPoolBlockSize_ =
+            std::min(std::max(blockSizeBytes, utils::HttpMemoryPool::MIN_BLOCK_SIZE),
+                     utils::HttpMemoryPool::BLOCK_SIZE);
+    }
+    if (poolBlocks > 0) memoryPoolBlocks_ = poolBlocks;
+    std::cout << "[INFO][HTTP服务器]：内存池已" << (enable ? "启用" : "禁用")
+              << " (块容量=" << (memoryPoolBlockSize_ ? memoryPoolBlockSize_
+                                                      : utils::HttpMemoryPool::BLOCK_SIZE)
+              << " 字节, 块数=" << (memoryPoolBlocks_ ? memoryPoolBlocks_
+                                                     : utils::HttpMemoryPool::DEFAULT_POOL_SIZE)
+              << ")" << std::endl;
 }
 
 // ---- 连接归属与代际校验 ----
@@ -564,7 +593,7 @@ void HttpServer::handleAccept() {
             auto ctx = std::make_unique<HttpContext>();
             ctx->setConnectionGeneration(net::connIdGeneration(connId));
             if (useMemoryPool_) {
-                ctx->enableMemoryPool(true);
+                ctx->enableMemoryPool(true, ownedMemoryPool_.get());
             }
             sr->contexts[clientFd] = std::move(ctx);
         }
@@ -696,10 +725,14 @@ void HttpServer::handleRead(int clientFd, int subReactorIndex, net::ConnId connI
 
     // 内存池缓冲区满，请求体被截断
     if (ctxPtr->isTruncated()) {
-        std::cerr << "[ERROR][HTTP服务器]：请求体超过内存池缓冲区上限" << std::endl;
+        // 给出可区分的上限：客户端据此决定分片/重试策略，而不是拿到一个笼统的 413（H7）
+        const size_t limit = ctxPtr->requestBufferCapacity();
+        std::cerr << "[ERROR][HTTP服务器]：请求超过内存池单块容量, limit=" << limit
+                  << " 字节" << std::endl;
         auto response = std::make_shared<HttpResponse>();
         response->setStatus(413, "Payload Too Large");
-        response->setBody("{\"error\":\"Payload too large\"}");
+        response->setBody("{\"error\":\"Payload too large\",\"limit\":" +
+                          std::to_string(limit) + "}");
         response->setHeader("Content-Type", "application/json");
         response->setHeader("Connection", "close");  // 请求被截断，不复用连接
         // 标记"响应已终结"，阻止路由覆盖该响应（H1）
