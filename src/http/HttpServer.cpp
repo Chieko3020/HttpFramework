@@ -99,51 +99,43 @@ bool HttpServer::start() {
 }
 
 void HttpServer::stop() {
-    if (!running_.load()) {
-        return;
-    }
+    // exchange 而非 load+store：并发调用 stop() 时只有一个执行关停流程；
+    // 同时 stop() 不再因 running_ 为 false 提前返回 —— start() 失败的路径
+    // 已经分配过 fd，必须由这里兜底释放（M5 的前提）。
+    const bool wasRunning = running_.exchange(false);
 
-    running_.store(false);
-
-    // 关闭监听 socket（唤醒主 Reactor）
-    if (listenFd_ >= 0) {
-        close(listenFd_);
-        listenFd_ = -1;
-    }
-
-    // 关闭主 epoll
-    if (mainEpollFd_ >= 0) {
-        close(mainEpollFd_);
-        mainEpollFd_ = -1;
-    }
-
-    // 关闭所有子 epoll 和 eventfd（唤醒子 Reactor）
-    for (auto& sr : subReactors_) {
-        if (sr && sr->epollFd >= 0) {
-            close(sr->epollFd);
-            sr->epollFd = -1;
+    if (wasRunning) {
+        // 唤醒子 Reactor：这里**不关闭** fd，只写 eventfd。
+        // 在途任务仍可能向 wakeFd 写入（notifyConnectionReady），
+        // 若先 close，那一笔写会落到被复用的 fd 号上。
+        for (auto& sr : subReactors_) {
+            if (sr && sr->wakeFd >= 0) {
+                uint64_t one = 1;
+                ssize_t n = ::write(sr->wakeFd, &one, sizeof(one));
+                (void)n;
+            }
         }
-        if (sr && sr->wakeFd >= 0) {
-            close(sr->wakeFd);
-            sr->wakeFd = -1;
+
+        // 等待 I/O 线程退出（两个 Reactor 的 epoll_wait 超时均为 1s，
+        // 最坏 1s 内自然退出，无需依赖关闭 fd 来打断它们）
+        if (mainReactorThread_.joinable()) {
+            mainReactorThread_.join();
         }
-        if (sr && sr->timerFd >= 0) {
-            close(sr->timerFd);
-            sr->timerFd = -1;
+        for (auto& sr : subReactors_) {
+            if (sr && sr->thread.joinable()) {
+                sr->thread.join();
+            }
         }
+
+        // I/O 线程已全部退出 ⇒ 不会再有新的任务入队。
+        // 在释放任何成员之前，必须等在途（含排队中）的业务任务归零：
+        // 任务体是 this 的成员函数（捕获 this），共享线程池的生命周期由调用方
+        // 掌控，析构后 worker 仍在访问 this 就是 UAF（H3）。
+        waitForInFlightTasks();
     }
 
-    // 等待主 Reactor 线程
-    if (mainReactorThread_.joinable()) {
-        mainReactorThread_.join();
-    }
-
-    // 等待所有子 Reactor 线程
-    for (auto& sr : subReactors_) {
-        if (sr && sr->thread.joinable()) {
-            sr->thread.join();
-        }
-    }
+    // 释放 fd（幂等）
+    releaseFds();
 
     // 关闭线程池（仅当自拥有时，共享池由 App 管理生命周期）
     if (ownedPool_) {
@@ -168,7 +160,65 @@ void HttpServer::stop() {
         conns_.clear();
     }
 
-    std::cout << "[INFO][HTTP服务器]：服务已停止" << std::endl;
+    if (wasRunning) {
+        std::cout << "[INFO][HTTP服务器]：服务已停止" << std::endl;
+    }
+}
+
+bool HttpServer::waitForInFlightTasks() {
+    if (inFlightTasks_.load(std::memory_order_acquire) == 0) return true;
+
+    std::unique_lock<std::mutex> lock(drainMutex_);
+    const int timeoutMs = drainTimeoutMs_.load();
+    const auto deadline = std::chrono::steady_clock::now() +
+                          std::chrono::milliseconds(timeoutMs);
+    // 谓词在持锁状态下求值、通知方也持锁，因此不存在"丢失唤醒"
+    bool drained = drainCv_.wait_until(lock, deadline, [this] {
+        return inFlightTasks_.load(std::memory_order_acquire) == 0;
+    });
+    if (!drained) {
+        std::cerr << "[ERROR][HTTP服务器]：关闭等待超时, 仍有 "
+                  << inFlightTasks_.load() << " 个在途任务未结束（>"
+                  << timeoutMs << "ms）；请先排空线程池再销毁 HttpServer"
+                  << std::endl;
+    }
+    return drained;
+}
+
+void HttpServer::finishInFlightTask() {
+    if (inFlightTasks_.fetch_sub(1, std::memory_order_acq_rel) == 1) {
+        // 持锁通知：与 waitForInFlightTasks 的谓词求值互斥，避免丢失唤醒
+        std::lock_guard<std::mutex> lock(drainMutex_);
+        drainCv_.notify_all();
+    }
+}
+
+void HttpServer::releaseFds() {
+    if (listenFd_ >= 0) {
+        close(listenFd_);
+        listenFd_ = -1;
+    }
+
+    if (mainEpollFd_ >= 0) {
+        close(mainEpollFd_);
+        mainEpollFd_ = -1;
+    }
+
+    for (auto& sr : subReactors_) {
+        if (!sr) continue;
+        if (sr->epollFd >= 0) {
+            close(sr->epollFd);
+            sr->epollFd = -1;
+        }
+        if (sr->wakeFd >= 0) {
+            close(sr->wakeFd);
+            sr->wakeFd = -1;
+        }
+        if (sr->timerFd >= 0) {
+            close(sr->timerFd);
+            sr->timerFd = -1;
+        }
+    }
 }
 
 bool HttpServer::initializeServer() {
@@ -724,9 +774,27 @@ void HttpServer::enqueueRequestTask(int subReactorIndex, int clientFd, net::Conn
         }
     );
 
-    threadPool_->enqueue([task]() {
-        task->execute();
-    });
+    // 在途计数在"入队之前"自增：这样排队中（尚未被 worker 取走）的任务同样算在途，
+    // stop() 不会在它开始执行前就放行析构（H3）。
+    inFlightTasks_.fetch_add(1, std::memory_order_acq_rel);
+    try {
+        threadPool_->enqueue([this, task]() {
+            // 保证计数一定被递减：execute() 内的异常会逃到线程池的 catch，
+            // 那就再也回不到 finishInFlightTask()（会把 stop() 卡到超时）
+            try {
+                task->execute();
+            } catch (...) {
+            }
+            finishInFlightTask();
+        });
+    } catch (const std::exception& e) {
+        // 线程池已关闭：撤销记账并撤销统计，不能把异常抛回 I/O 线程
+        // （抛出会逃出 subReactorLoop，直接 std::terminate）
+        finishInFlightTask();
+        stats_.queuedTasks.fetch_sub(1);
+        std::cerr << "[ERROR][HTTP服务器]：提交任务失败（线程池可能已关闭）: "
+                  << e.what() << std::endl;
+    }
 }
 
 void HttpServer::handleTimer(int subReactorIndex) {

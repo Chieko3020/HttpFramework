@@ -165,7 +165,8 @@ struct Fixture {
     bool started = false;
 
     bool up(int idleSec = 60, size_t subReactors = 1, bool pool_ = false,
-            size_t workers = 4) {
+            size_t workers = 4,
+            std::function<void(router::Router&)> extra = nullptr) {
         port = pickPort();
         if (port == 0) return false;
         pool = std::make_unique<utils::ThreadPool>(workers);
@@ -199,6 +200,8 @@ struct Fixture {
             res.setText("SLOWDONE");
         });
         server->setRouter(r);
+
+        if (extra) extra(*r);   // 用例自定义路由（必须在 start() 之前注册）
 
         started = server->start();
         if (started) {
@@ -541,6 +544,58 @@ static bool test_stale_fd_no_crosstalk() {
     return true;
 }
 
+// ── H3：共享线程池下 stop() 必须等在途任务结束再释放成员 ──
+// 任务体是 HttpServer 的成员函数（捕获 this），失败模式是 ~HttpServer 返回后
+// worker 仍在访问已释放的 this。客户端不可见，改成"stop() 返回时在途任务必须
+// 已结束"这一可直接断言的判据。
+static bool test_stop_waits_for_inflight() {
+    TEST("H3 stop() 等待在途业务任务归零（共享线程池）");
+    auto entered  = std::make_shared<std::atomic<int>>(0);
+    auto finished = std::make_shared<std::atomic<int>>(0);
+
+    Fixture f;
+    if (!f.up(60, 1, false, 4, [entered, finished](router::Router& r) {
+            r.get("/h3slow", [entered, finished](const http::HttpRequest&,
+                                                 http::HttpResponse& res) {
+                entered->fetch_add(1);
+                std::this_thread::sleep_for(std::chrono::milliseconds(1500));
+                finished->fetch_add(1);
+                res.setText("H3DONE");
+            });
+        })) FAIL("服务器启动失败");
+
+    int s = connectTo(f.port);
+    CHECK(s >= 0, "连接失败");
+    CHECK(sendAll(s, req("GET", "/h3slow")), "发送失败");
+
+    // 等到 handler 真正开始执行，确保 stop() 面对的是"在途"状态
+    for (int i = 0; i < 200 && entered->load() == 0; ++i)
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    CHECK(entered->load() == 1, "handler 未进入执行");
+
+    const auto t0 = std::chrono::steady_clock::now();
+    f.server->stop();
+    const auto waitedMs =
+        std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - t0).count();
+
+    std::cout << "(stop 耗时=" << waitedMs << "ms, handler 完成数="
+              << finished->load() << ") ";
+
+    CHECK(finished->load() == 1,
+          "stop() 返回时在途 handler 仍未结束：析构后 worker 会访问已释放的 this");
+    CHECK(f.server->inFlightTaskCount() == 0,
+          "stop() 返回后在途任务计数应为 0, 实际 " << f.server->inFlightTaskCount());
+    // 等待发生在途任务（handler 还要睡约 1.4s）；修复前 stop() 只做 fd 关闭+join，
+    // 几十毫秒就返回
+    CHECK(waitedMs >= 800, "stop() 未等待在途任务, 仅耗时 " << waitedMs << "ms");
+
+    close(s);
+    f.down();
+    PASS();
+    return true;
+}
+
 int main() {
     std::cout << "=== test_http_hardening ===" << std::endl;
     ignoreSigpipeInTest();
@@ -558,6 +613,7 @@ int main() {
     run(test_accept_race,             "C6 accept 竞态");
     run(test_payload_too_large,       "H1/H2 413 与统计");
     run(test_stale_fd_no_crosstalk,   "C2 陈旧 fd 防误杀");
+    run(test_stop_waits_for_inflight, "H3 stop 排空在途任务");
 
     std::cout << std::endl
               << "结果: " << g_testsPassed << " 通过, "

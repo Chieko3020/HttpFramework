@@ -6,6 +6,7 @@
 #include <map>
 #include <unordered_map>
 #include <mutex>
+#include <condition_variable>
 #include <set>
 #include <vector>
 #include <sys/epoll.h>
@@ -43,6 +44,14 @@ public:
     bool start();
     void stop();
     bool isRunning() const { return running_.load(); }
+
+    // stop() 等待在途业务任务的超时（毫秒，默认 5000）。
+    // 共享线程池下，在途任务捕获了 this；stop() 必须等它们归零再释放成员（H3）。
+    // 超时只影响"等待多久"，超时后会打印错误但不阻塞关闭流程。
+    void setShutdownDrainTimeoutMs(int ms) { drainTimeoutMs_.store(ms > 0 ? ms : 1); }
+    int shutdownDrainTimeoutMs() const { return drainTimeoutMs_.load(); }
+    // 当前在途业务任务数（含已入队未开始）；仅用于观测与测试
+    uint64_t inFlightTaskCount() const { return inFlightTasks_.load(); }
 
     void setRouter(std::shared_ptr<router::Router> router);
 
@@ -124,11 +133,25 @@ private:
     // 空闲连接超时（秒）
     int idleTimeoutSec_{60};
 
+    // stop() 关停排空（H3）：在途任务计数 + 归零通知
+    std::atomic<uint64_t> inFlightTasks_{0};
+    mutable std::mutex drainMutex_;
+    std::condition_variable drainCv_;
+    std::atomic<int> drainTimeoutMs_{5000};
+
     // ---- 初始化 ----
     bool initializeServer();
     bool setupMainEpoll();
     bool setupSubReactor(size_t index);
     bool setNonBlocking(int fd);
+
+    // ---- 关停 ----
+    // 等待在途业务任务归零；返回是否在超时前归零
+    bool waitForInFlightTasks();
+    // 业务任务（含排队中的）结束时调用：递减计数并在归零时唤醒 stop()
+    void finishInFlightTask();
+    // 释放监听/主 epoll/子 reactor 的 fd（幂等，可重复调用）
+    void releaseFds();
 
     // ---- 主 Reactor ----
     void mainReactorLoop();
