@@ -61,7 +61,10 @@ struct WssConnectionState {
     // 避免"关闭帧已发出但连接一直挂着"的僵尸连接（H11/M14）
     std::chrono::steady_clock::time_point close_deadline;
 
+    // userData 会被两类线程访问：WsRouter::onOpen/onClose（I/O 线程）与
+    // WsRouter::dispatch（线程池 worker，写 ws_param_*），因此加锁（③ 顺带修）
     std::unordered_map<std::string, std::string> userData;
+    mutable std::mutex userDataMu;
     std::string remoteAddr;
     std::string upgradePath;
     std::vector<uint8_t> preUpgradeBuf;   // 累积升级前的原始字节，用于跨 TLS 记录解析路径

@@ -614,6 +614,61 @@ static bool test_outbound_order_under_concurrency(const std::string& cert, const
     return true;
 }
 
+// ③ WsRouter 路径计划缓存：同一路径的第二条消息必须用缓存仍得到与第一条
+// 完全相同的结果（路径参数、中间件链、handler 全部命中）。
+static bool test_router_plan_cache(const std::string& cert, const std::string& key) {
+    TEST("③ WsRouter 计划缓存：参数路由 + 全局/作用域中间件在多条消息上一致");
+    WssFixture f;
+    if (!f.up(cert, key)) FAIL("WSS 服务启动失败");
+
+    std::atomic<int> globalCount{0};
+    std::atomic<int> scopedCount{0};
+    f.router->addMiddleware([&globalCount](http::WssConnection&, http::wss::WsMessage&,
+                                          std::function<void()> next) {
+        globalCount.fetch_add(1);
+        next();
+    });
+    // 注意：作用域中间件是"精确路径匹配"（compilePath 生成 ^/users/42$），
+    // 不像 HTTP 侧的 RouterHandler 那样做前缀/参数匹配 —— 这里按实现语义注册
+    f.router->addMiddleware("/users/42", [&scopedCount](http::WssConnection&, http::wss::WsMessage&,
+                                                       std::function<void()> next) {
+        scopedCount.fetch_add(1);
+        next();
+    });
+    // 参数路由：handler 把 :id 回显出来，验证缓存命中时参数仍然提取正确
+    f.router->addHandler("/users/:id", [](http::WssConnection& conn,
+                                          const http::wss::WsMessage& msg) {
+        if (msg.isText()) conn.sendText("id=" + conn.getUserData("ws_param_id"));
+    });
+
+    TlsClient c;
+    CHECK(c.connect(f.port), "TLS 连接失败");
+    CHECK(c.writeAll(wsUpgradeRequest("/users/42")), "发送升级请求失败");
+    bool got = false;
+    std::string head = c.readHttpHeader(&got);
+    CHECK(got && head.rfind("HTTP/1.1 101", 0) == 0, "升级失败");
+
+    std::vector<std::string> replies;
+    for (int i = 0; i < 3; ++i) {
+        CHECK(c.writeAll(buildClientFrameRaw(0x1, "ping", true)), "发送消息失败");
+        uint8_t opcode = 0;
+        std::string payload;
+        if (!readServerFrame(c, &opcode, &payload, 3000)) break;
+        if (opcode == 0x1) replies.push_back(payload);
+    }
+    std::cout << "(回复数=" << replies.size() << " 全局mw=" << globalCount.load()
+              << " 作用域mw=" << scopedCount.load() << ") ";
+    c.closeAll();
+    f.down();
+
+    CHECK(replies.size() == 3, "应收到 3 条回复, 实际 " << replies.size());
+    for (const auto& r : replies) CHECK(r == "id=42", "参数应始终为 42, 实际 " << r);
+    CHECK(globalCount.load() == 3, "全局中间件应每条消息执行一次, 实际 " << globalCount.load());
+    CHECK(scopedCount.load() == 3, "作用域中间件应每条消息执行一次, 实际 " << scopedCount.load());
+    PASS();
+    return true;
+}
+
 int main() {
     std::cout << "=== test_wss_hardening ===" << std::endl;
 
@@ -639,6 +694,7 @@ int main() {
     run(test_l9_payload_checks,                  "L9 UTF-8/长度编码", cert, key);
     run(test_upgrade_header_limit,               "M18 升级头上限", cert, key);
     run(test_outbound_order_under_concurrency,   "③ 并发出站顺序", cert, key);
+    run(test_router_plan_cache,                  "③ 路由计划缓存", cert, key);
 
     { int rc = system(("rm -f " + cert + " " + key).c_str()); (void)rc; }
 

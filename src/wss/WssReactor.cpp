@@ -71,13 +71,16 @@ void WssConnection::close(uint16_t code) {
     state.outbound.push_back(std::move(item));
 }
 void WssConnection::setUserData(const std::string& key, const std::string& value) {
+    std::lock_guard<std::mutex> lk(state.userDataMu);
     state.userData[key] = value;
 }
 std::string WssConnection::getUserData(const std::string& key) const {
+    std::lock_guard<std::mutex> lk(state.userDataMu);
     auto it = state.userData.find(key);
     return it != state.userData.end() ? it->second : std::string();
 }
 bool WssConnection::hasUserData(const std::string& key) const {
+    std::lock_guard<std::mutex> lk(state.userDataMu);
     return state.userData.count(key) > 0;
 }
 
