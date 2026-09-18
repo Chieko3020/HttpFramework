@@ -12,9 +12,12 @@
 #define PASS() std::cout << "通过" << std::endl
 #define FAIL(msg) do { std::cerr << "失败: " << msg << std::endl; return false; } while(0)
 #define CHECK(cond, msg) if (!(cond)) FAIL(msg)
+// SKIP：报告为"跳过"（计入 g_testsSkipped），不计入通过
+#define SKIP(msg) do { std::cout << "跳过 (" << msg << ")" << std::endl; ++g_testsSkipped; return true; } while(0)
 
 static int g_testsPassed = 0;
 static int g_testsFailed = 0;
+static int g_testsSkipped = 0;
 
 // 辅助：构造简单 HTTP 请求字符串
 static std::string makeRequest(const std::string& method, const std::string& path,
@@ -322,7 +325,8 @@ int main() {
 
     std::cout << std::endl
               << "结果: " << g_testsPassed << " 通过, "
-              << g_testsFailed << " 失败" << std::endl;
+              << g_testsFailed << " 失败, "
+              << g_testsSkipped << " 跳过" << std::endl;
 
     return g_testsFailed > 0 ? 1 : 0;
 }

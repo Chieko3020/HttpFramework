@@ -13,9 +13,12 @@
 #define PASS() std::cout << "通过" << std::endl
 #define FAIL(msg) do { std::cerr << "失败: " << msg << std::endl; return false; } while(0)
 #define CHECK(cond, msg) if (!(cond)) FAIL(msg)
+// SKIP：报告为"跳过"（计入 g_testsSkipped），不计入通过
+#define SKIP(msg) do { std::cout << "跳过 (" << msg << ")" << std::endl; ++g_testsSkipped; return true; } while(0)
 
 static int g_testsPassed = 0;
 static int g_testsFailed = 0;
+static int g_testsSkipped = 0;
 
 // 辅助：shell 命令包装
 static inline void sh(const char* cmd) { int r = system(cmd); (void)r; }
@@ -76,14 +79,45 @@ static bool test_fallback_on_missing() {
     return true;
 }
 
+// 原实现直接加载**真实存在**的 templates/index.html（TEMPLATES_DIR 是编译期
+// 绝对路径，从任何目录运行都能找到），因此根本没覆盖 fallback 分支 ——
+// 断言只校验"包含 HTML 结构"，把 fallback 删掉也能通过。
+// 这里把 index.html 临时移开，强制走 fallback，并断言 fallback 特有文案；
+// 最后无论成败都恢复原文件。
 static bool test_index_fallback() {
-    TEST("index.html 缺失时返回特定 fallback 页面");
-    std::string result = utils::TemplateLoader::loadTemplate("index.html");
+    TEST("index.html 缺失时返回 index 专用 fallback 页面");
+    const std::string tmplDir = std::string(TEMPLATES_DIR);
+    const std::string indexPath = tmplDir + "index.html";
+    const std::string backupPath = tmplDir + "index.html.bak-test";
 
-    CHECK(!result.empty(), "结果不应为空");
-    CHECK(result.find("<html") != std::string::npos
-          || result.find("<!DOCTYPE html>") != std::string::npos,
-          "应包含 HTML 结构");
+    auto restore = [&]() {
+        sh("mv -f '" + backupPath + "' '" + indexPath + "' 2>/dev/null || true");
+    };
+
+    if (!std::ifstream(indexPath).good()) {
+        SKIP(std::string("模板目录里没有 index.html（") + indexPath + "），无法做缺失对照");
+    }
+
+    sh("mv -f '" + indexPath + "' '" + backupPath + "'");
+    if (std::ifstream(indexPath).good()) {
+        restore();
+        FAIL("无法临时移开 " + indexPath + "（权限？）");
+    }
+
+    std::string result = utils::TemplateLoader::loadTemplate("index.html");
+    std::cout << "(fallback长度=" << result.size() << ") ";
+    const bool fallbackText = result.find("Template Not Found") != std::string::npos ||
+                              result.find("模板文件未找到") != std::string::npos;
+    restore();
+
+    CHECK(!result.empty(), "fallback 不应为空");
+    CHECK(fallbackText,
+          "缺失 index.html 时必须返回带 'Template Not Found'/'模板文件未找到' 的 fallback 页"
+          "（说明确实走了 fallback 分支）, 实际前 80 字: " + result.substr(0, 80));
+    // 反向对照：恢复后必须能加载真实模板（否则"返回 fallback"可能只是因为路径写错了）
+    const std::string realResult = utils::TemplateLoader::loadTemplate("index.html");
+    CHECK(realResult.find("Template Not Found") == std::string::npos,
+          "恢复 index.html 后不应再返回 fallback");
 
     PASS();
     return true;
@@ -129,7 +163,8 @@ int main() {
 
     std::cout << std::endl
               << "结果: " << g_testsPassed << " 通过, "
-              << g_testsFailed << " 失败" << std::endl;
+              << g_testsFailed << " 失败, "
+              << g_testsSkipped << " 跳过" << std::endl;
 
     return g_testsFailed > 0 ? 1 : 0;
 }

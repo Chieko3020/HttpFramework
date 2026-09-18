@@ -1,6 +1,12 @@
 #include "utils/db/DbConnectionPool.h"
 #include <iostream>
 #include <chrono>
+#include <cstring>
+#include <arpa/inet.h>
+#include <netinet/in.h>
+#include <sys/socket.h>
+#include <sys/time.h>
+#include <unistd.h>
 
 namespace db {
 
@@ -16,12 +22,40 @@ DbConnectionPool::~DbConnectionPool() {
     shutdown();
 }
 
+namespace {
+
+// 只做 TCP 可连性探测（不建 MySQL 会话），用于区分"服务端不可达"与
+// "服务端可达但拒绝凭据/库"。1 秒超时，失败即返回 false。
+bool probeTcp(const std::string& host, int port) {
+    int fd = ::socket(AF_INET, SOCK_STREAM, 0);
+    if (fd < 0) return false;
+    struct timeval tv;
+    tv.tv_sec = 1;
+    tv.tv_usec = 0;
+    ::setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+    ::setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+    struct sockaddr_in addr;
+    std::memset(&addr, 0, sizeof(addr));
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons(static_cast<uint16_t>(port));
+    bool ok = false;
+    if (::inet_pton(AF_INET, host.c_str(), &addr.sin_addr) == 1)
+        ok = (::connect(fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) == 0);
+    ::close(fd);
+    return ok;
+}
+
+}  // namespace
+
 bool DbConnectionPool::initialize() {
     std::lock_guard<std::mutex> lock(mutex_);
 
     if (initialized_.load()) {
         return true;   // 幂等（M13）
     }
+
+    serverReachable_ = probeTcp(host_, port_);
+    lastInitError_.clear();
 
     try {
         // 创建初始连接
@@ -36,7 +70,11 @@ bool DbConnectionPool::initialize() {
         }
         
         if (availableConnections_.empty()) {
-            std::cerr << "[ERROR][数据库]：所有数据库连接创建失败" << std::endl;
+            lastInitError_ = serverReachable_
+                ? "server reachable but MySQL rejected connection (credentials/schema)"
+                : "MySQL server unreachable (TCP connect failed)";
+            std::cerr << "[ERROR][数据库]：所有数据库连接创建失败 (" << lastInitError_ << ")"
+                      << std::endl;
             return false;
         }
         
@@ -53,6 +91,7 @@ bool DbConnectionPool::initialize() {
         return true;
         
     } catch (const std::exception& e) {
+        lastInitError_ = std::string("exception: ") + e.what();
         std::cerr << "[ERROR][数据库]：连接池初始化失败: " << e.what() << std::endl;
         return false;
     }

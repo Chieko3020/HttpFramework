@@ -42,9 +42,12 @@
 #define PASS() std::cout << "通过" << std::endl
 #define FAIL(msg) do { std::cerr << "失败: " << msg << std::endl; return false; } while (0)
 #define CHECK(cond, msg) if (!(cond)) FAIL(msg)
+// SKIP：报告为"跳过"（计入 g_testsSkipped），不计入通过
+#define SKIP(msg) do { std::cout << "跳过 (" << msg << ")" << std::endl; ++g_testsSkipped; return true; } while(0)
 
 static int g_testsPassed = 0;
 static int g_testsFailed = 0;
+static int g_testsSkipped = 0;
 
 // ───────────────────────── 证书 ─────────────────────────
 
@@ -699,7 +702,8 @@ int main() {
     { int rc = system(("rm -f " + cert + " " + key).c_str()); (void)rc; }
 
     std::cout << std::endl
-              << "结果: " << g_testsPassed << " 通过, " << g_testsFailed << " 失败" << std::endl;
+              << "结果: " << g_testsPassed << " 通过, " << g_testsFailed << " 失败, "
+              << g_testsSkipped << " 跳过" << std::endl;
     return g_testsFailed > 0 ? 1 : 0;
 }
 

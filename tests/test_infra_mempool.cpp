@@ -13,9 +13,12 @@
 #define PASS() std::cout << "通过" << std::endl
 #define FAIL(msg) do { std::cerr << "失败: " << msg << std::endl; return false; } while(0)
 #define CHECK(cond, msg) if (!(cond)) FAIL(msg)
+// SKIP：报告为"跳过"（计入 g_testsSkipped），不计入通过
+#define SKIP(msg) do { std::cout << "跳过 (" << msg << ")" << std::endl; ++g_testsSkipped; return true; } while(0)
 
 static int g_testsPassed = 0;
 static int g_testsFailed = 0;
+static int g_testsSkipped = 0;
 
 static bool test_allocate_non_null() {
     TEST("allocate 返回非空块且标记 isUsed");
@@ -196,30 +199,52 @@ static bool test_pooled_buffer_move() {
 }
 
 static bool test_thread_safety() {
-    TEST("多线程并发 alloc/dealloc 无损坏");
+    TEST("多线程并发 alloc/dealloc：每次拿到手的块必须归本线程且无重复");
     utils::HttpMemoryPool pool(500);
 
-    std::atomic<int> errors{0};
+    // 原实现只断言一个"从未递增的 errors 计数器"，恒真。
+    // 这里改为真能失败的断言：
+    //   ① 每个线程每次拿到的块必须不在本线程当前持有集合里（重复 = 同一块被发两次）
+    //   ② 每块都写入并回读自己的哨兵值（内容被别的线程覆写 = 块被共享）
+    //   ③ 池的记账前后一致（used=0、alloc/dealloc 调用数配平）
+    std::atomic<int> duplicateAllocs{0};
+    std::atomic<int> sentinelErrors{0};
 
-    auto worker = [&pool, &errors](int id) {
+    auto worker = [&pool, &duplicateAllocs, &sentinelErrors](int id) {
+        std::vector<utils::MemoryBlock*> held;
+        held.reserve(8);
         for (int i = 0; i < 100; ++i) {
             auto* b = pool.allocate();
-            if (b) {
-                b->data[0] = static_cast<char>(id);
-                std::this_thread::sleep_for(std::chrono::microseconds(10));
-                pool.deallocate(b);
+            if (!b) continue;
+            const char sentinel = static_cast<char>('A' + (id % 26));
+            b->data[0] = sentinel;
+            std::this_thread::sleep_for(std::chrono::microseconds(10));
+            if (b->data[0] != sentinel) sentinelErrors.fetch_add(1);
+            for (auto* h : held) {
+                if (h == b) { duplicateAllocs.fetch_add(1); break; }  // 同一块被发两次
+            }
+            held.push_back(b);   // 故意先持有一小批，制造跨线程竞争窗口
+            if (held.size() >= 8) {
+                for (auto* p : held) pool.deallocate(p);
+                held.clear();
             }
         }
+        for (auto* p : held) pool.deallocate(p);
     };
 
     std::vector<std::thread> threads;
-    for (int i = 0; i < 4; ++i) {
-        threads.emplace_back(worker, i);
-    }
+    for (int i = 0; i < 4; ++i) threads.emplace_back(worker, i);
     for (auto& t : threads) t.join();
 
+    CHECK(sentinelErrors.load() == 0,
+          "并发期间块内容被覆写（同一块被两个线程同时持有）: " << sentinelErrors.load());
+    CHECK(duplicateAllocs.load() == 0,
+          "重复分配了同一块: " << duplicateAllocs.load());
     CHECK(pool.getUsedBlocks() == 0, "并发操作后已用应为 0, 实际 " << pool.getUsedBlocks());
-    CHECK(errors.load() == 0, "并发操作中不应有错误");
+    CHECK(pool.allocCalls() == pool.deallocCalls(),
+          "alloc/dealloc 调用数不配平: " << pool.allocCalls() << " vs " << pool.deallocCalls());
+    CHECK(pool.allocateFailures() == 0,
+          "500 块池足够 4 线程使用，不应出现分配失败: " << pool.allocateFailures());
 
     PASS();
     return true;
@@ -262,7 +287,8 @@ int main() {
 
     std::cout << std::endl
               << "结果: " << g_testsPassed << " 通过, "
-              << g_testsFailed << " 失败" << std::endl;
+              << g_testsFailed << " 失败, "
+              << g_testsSkipped << " 跳过" << std::endl;
 
     return g_testsFailed > 0 ? 1 : 0;
 }

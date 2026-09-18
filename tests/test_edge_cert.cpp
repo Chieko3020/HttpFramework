@@ -14,9 +14,12 @@
 #define PASS() std::cout << "通过" << std::endl
 #define FAIL(msg) do { std::cerr << "失败: " << msg << std::endl; return false; } while(0)
 #define CHECK(cond, msg) if (!(cond)) FAIL(msg)
+// SKIP：报告为"跳过"（计入 g_testsSkipped），不计入通过
+#define SKIP(msg) do { std::cout << "跳过 (" << msg << ")" << std::endl; ++g_testsSkipped; return true; } while(0)
 
 static int g_testsPassed = 0;
 static int g_testsFailed = 0;
+static int g_testsSkipped = 0;
 
 // 辅助：shell 命令包装
 static inline void sh(const char* cmd) { int r = system(cmd); (void)r; }
@@ -77,20 +80,27 @@ static bool test_missing_cert_file() {
 }
 
 static bool test_cert_key_mismatch() {
-    TEST("证书与密钥不匹配时不崩溃");
+    TEST("证书与密钥不匹配时返回 nullptr（不崩溃）");
     auto [cert1, key1] = generateCertKeyPair("pair1");
     auto [cert2, key2] = generateCertKeyPair("pair2");
 
     http::wss::TlsConfig cfg;
     cfg.certFile = cert1;
-    cfg.keyFile = key2;
+    cfg.keyFile = key2;      // 与 cert1 不匹配的私钥
 
     SSL_CTX* ctx = http::wss::createServerContext(cfg);
-    // 无论成功与否，不应崩溃
-    if (ctx != nullptr) {
-        SSL_CTX_free(ctx);
-    }
-    std::cout << "(ctx=" << (ctx ? "已创建" : "nullptr") << ") ";
+    // 原实现只有一句打印、零 CHECK：任何行为都会"通过"。
+    // 实现契约（OpenSslHelpers.cpp 的 check 失败路径）：不匹配 → 返回 nullptr。
+    CHECK(ctx == nullptr, "证书与私钥不匹配时应返回 nullptr（不匹配的密钥不能被接受）");
+    if (ctx != nullptr) SSL_CTX_free(ctx);   // 防御：万一实现返回了 ctx 也要释放
+
+    // 反向对照：把匹配的那对装回去必须成功，避免"什么都返回 nullptr"也算过
+    http::wss::TlsConfig okCfg;
+    okCfg.certFile = cert1;
+    okCfg.keyFile = key1;
+    SSL_CTX* okCtx = http::wss::createServerContext(okCfg);
+    CHECK(okCtx != nullptr, "匹配的证书/私钥必须能创建 SSL_CTX（对照组）");
+    if (okCtx) SSL_CTX_free(okCtx);
 
     sh("rm -f " + cert1 + " " + key1 + " " + cert2 + " " + key2);
     PASS();
@@ -104,7 +114,9 @@ static bool test_empty_cert_paths() {
     cfg.keyFile = "";
 
     SSL_CTX* ctx = http::wss::createServerContext(cfg);
-    CHECK(ctx == nullptr, "空路径应返回 nullptr");
+    // 契约：空路径必须返回 nullptr，绝不返回可用的 ctx
+    CHECK(ctx == nullptr, "空路径不应返回可用的 SSL_CTX");
+    if (ctx != nullptr) SSL_CTX_free(ctx);
 
     PASS();
     return true;
@@ -152,7 +164,8 @@ int main() {
 
     std::cout << std::endl
               << "结果: " << g_testsPassed << " 通过, "
-              << g_testsFailed << " 失败" << std::endl;
+              << g_testsFailed << " 失败, "
+              << g_testsSkipped << " 跳过" << std::endl;
 
     return g_testsFailed > 0 ? 1 : 0;
 }

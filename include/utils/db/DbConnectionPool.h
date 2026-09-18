@@ -76,6 +76,13 @@ public:
     size_t getAvailableConnections() const;
     size_t getTotalConnections() const;
 
+    // 最近一次 initialize() 失败的原因（成功时为空）。让调用方/测试能区分
+    // "服务端连不上"与"服务端可达但凭据/库被拒" —— 两者都返回 false，
+    // 但含义完全不同（测试用例此前无法区分，属"因错误的原因通过"）。
+    const std::string& lastInitError() const { return lastInitError_; }
+    // 服务端是否可达（TCP 3306 能否连上）；initialize() 会更新该值
+    bool serverReachable() const { return serverReachable_; }
+
     // 健康检查（只检查空闲连接：借出中的连接归业务线程所有，
     // MySQL Connector/C++ 的 Connection 不是线程安全的）（M13）
     void healthCheck();
@@ -97,6 +104,8 @@ private:
     std::thread healthCheckThread_;
     std::atomic<bool> healthCheckRunning_;
     std::atomic<bool> initialized_{false};
+    std::string lastInitError_;
+    bool serverReachable_{false};
 
     // 创建新连接
     std::shared_ptr<DbConnection> createConnection();
