@@ -183,9 +183,11 @@ static bool test_clear() {
 static bool test_set_body_binary() {
     TEST("setBody 支持带长度的二进制数据");
     http::HttpResponse res;
-    const char* data = "binary\x00data";
-    // 通过显式长度传递包含 '\0' 的 11 字节数据
-    res.setBody(data, 11);
+    // 注意：不能写 "binary\x00data" —— C++ 的 \x 转义会吞掉后续所有十六进制位，
+    // "\x00d" 实际是 0x0d（CR），字面量只有 10 字节，setBody(data, 11) 会越界读 1 字节
+    // （ASan 在 global-buffer-overflow 下抓到过）。这里显式给出 11 字节数组。
+    const char data[] = {'b', 'i', 'n', 'a', 'r', 'y', '\0', 'd', 'a', 't', 'a'};
+    res.setBody(data, sizeof(data));
 
     std::string body = res.getBody();
     // std::string 支持内嵌 '\0'，length() 应返回 11
