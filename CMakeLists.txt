@@ -17,6 +17,24 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 # 设置编译选项
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wall -Wextra -O2")
+
+# ── 可选：更强的编译期检查与 sanitizer（L15）──
+# 默认关闭，避免影响发布构建；开启方式：
+#   cmake -B build -DENABLE_STRICT_WARNINGS=ON
+#   cmake -B build-asan -DSANITIZE=address   （address / thread / undefined）
+option(ENABLE_STRICT_WARNINGS "启用 -Werror=return-type / -Werror=unused-result" OFF)
+set(SANITIZE "" CACHE STRING "Sanitizer: address / thread / undefined（空 = 关闭）")
+
+if(ENABLE_STRICT_WARNINGS)
+    add_compile_options(-Werror=return-type -Werror=unused-result
+                        -Werror=uninitialized -Werror=delete-non-virtual-dtor)
+endif()
+
+if(SANITIZE)
+    message(STATUS "Sanitizer enabled: ${SANITIZE}")
+    add_compile_options(-fsanitize=${SANITIZE} -fno-omit-frame-pointer -g)
+    add_link_options(-fsanitize=${SANITIZE})
+endif()
 set(CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG} -g -DDEBUG")
 
 # 作为顶层项目时的选项

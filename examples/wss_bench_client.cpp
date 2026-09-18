@@ -3,6 +3,9 @@
 // 示例: wss_bench_client localhost 9443 /echo 1000 256
 //
 // 单 TLS 连接、多消息发送，精确测量 WebSocket 吞吐量和延迟
+//
+// ⚠️ 安全性说明（L10）：本客户端不校验证书（SSL_VERIFY_NONE），
+// 只用于本机/内网基准测试，不是生产客户端范例。
 
 #include "HttpFramework/wss/WebSocketCodec.h"
 #include "HttpFramework/wss/OpenSslHelpers.h"
@@ -103,6 +106,9 @@ int main(int argc, char* argv[]) {
 
         // 2. TLS 握手
         SSL_CTX* ctx = SSL_CTX_new(TLS_client_method());
+        // 明确关闭证书校验（L10）：这是**基准测试客户端**，不是生产客户端范例。
+        // 生产客户端必须调用 SSL_CTX_set_verify(..., SSL_VERIFY_PEER, ...) 并加载 CA。
+        SSL_CTX_set_verify(ctx, SSL_VERIFY_NONE, nullptr);
         SSL_CTX_set_min_proto_version(ctx, TLS1_2_VERSION);
         SSL_CTX_set_max_proto_version(ctx, TLS1_3_VERSION);
         SSL* ssl = SSL_new(ctx);

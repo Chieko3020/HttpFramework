@@ -20,14 +20,15 @@ int main() {
     // ── WSS 路由 ──
     app.enableWss(9443, "certs/server_cert.pem", "certs/server_key.pem");
 
-    // Echo 端点 — 匹配任意路径，收到什么文本就回什么
+    // Echo 端点 — 只匹配路径 "/"（compilePath("/") 生成 ^/$，是精确匹配，
+    // 不是"匹配任意路径"）。若要匹配任意路径请注册 "/*" （L11）。
     app.ws("/", [](http::WssConnection& conn, const http::wss::WsMessage& msg) {
         if (msg.isText()) {
             conn.sendText("Echo: " + msg.text());
         }
     });
 
-    // 连接/断开日志
+    // 连接/断开日志（同样只对路径 "/" 生效）
     app.onWsOpen("/", [](http::WssConnection& conn) {
         std::cout << "[INFO][WSS]：客户端已连接, id=" << conn.id()
                   << " from=" << conn.remoteAddr() << std::endl;
