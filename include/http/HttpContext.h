@@ -55,13 +55,6 @@ public:
     void clearData();
     void consumeData(size_t n);  // 只消费前 n 字节，保留剩余数据
 
-    // 响应数据管理 - 支持内存池和传统方式
-    // 返回值：true = 响应完整落入缓冲区；false = 内存池单块装不下，已自动回退到
-    // std::string 路径（内容仍然完整，只是内存来源不同）。绝不静默截断。
-    bool setResponseData(const std::string& data);
-    bool setResponseData(const char* data, size_t len);
-    std::string getResponseData() const;
-    
     // 内存池管理
     void enableMemoryPool(bool enable = true);
     bool isMemoryPoolEnabled() const { return useMemoryPool_; }
@@ -96,29 +89,20 @@ public:
     void setConnectionGeneration(uint32_t generation) { connectionGeneration_ = generation; }
     uint32_t connectionGeneration() const { return connectionGeneration_; }
 
-    // ── 与业务线程之间的响应发布协议 ──
-    // 响应由 worker 线程生成、由 I/O 线程读取/发送。裸读 std::string 与 worker 的
-    // setResponseData() 构成数据竞争（可表现为 I/O 线程读到"暂时为空"的响应，
-    // 从而既不发响应也不重新武装 EPOLLIN，请求永久丢失）。这里用
-    // shared_ptr + atomic release/acquire 建立 happens-before：
-    //   worker：setResponseData(...) → publishResponse(shared_ptr)（release）
-    //   I/O   ：hasPendingResponse()（acquire）→ getResponseData()
-    // I/O 线程读过一次后必须调用 releasePendingResponse()，否则会重复发送。
-    void publishResponse(std::shared_ptr<const std::string> data) {
-        pendingResponse_ = std::move(data);
-        pendingResponseReady_.store(true, std::memory_order_release);
+    // ── 响应区（H5）──
+    // 重要约定：**只有 I/O 线程触碰**这些状态。
+    // 业务（worker）线程只把"要发送的字节"投递到 subReactor 的响应队列，
+    // 由 I/O 线程取出后写入这里。这样 ctx 上不再有任何跨线程字段
+    // （此前的 publishResponse 虽然用 release/acquire 发布，但 shared_ptr 本身的
+    //  写与读仍是竞争，只能靠"同一连接只有一个在途响应"的契约兜住）。
+    void setCurrentResponse(std::shared_ptr<const std::string> data) {
+        currentResponse_ = std::move(data);
     }
-    bool hasPendingResponse() const {
-        return pendingResponseReady_.load(std::memory_order_acquire);
+    bool hasCurrentResponse() const { return static_cast<bool>(currentResponse_); }
+    const std::shared_ptr<const std::string>& currentResponse() const {
+        return currentResponse_;
     }
-    std::shared_ptr<const std::string> takePendingResponse() {
-        pendingResponseReady_.store(false, std::memory_order_release);
-        return pendingResponse_;
-    }
-    void dropPendingResponse() {
-        pendingResponseReady_.store(false, std::memory_order_release);
-        pendingResponse_.reset();
-    }
+    void clearCurrentResponse() { currentResponse_.reset(); }
 
 private:
     HttpRequest request_;
@@ -129,12 +113,10 @@ private:
     
     // 传统缓冲区（向后兼容）
     std::string buffer_;        // 请求数据缓冲区
-    std::string responseData_;  // 响应数据缓冲区
-    
-    // 内存池缓冲区
+
+    // 内存池缓冲区（仅请求方向；响应方向不再使用固定块池，见 H5）
     bool useMemoryPool_;
     std::unique_ptr<utils::PooledBuffer> requestBuffer_;
-    std::unique_ptr<utils::PooledBuffer> responseBuffer_;
     
     // 全局内存池指针 (延迟初始化，避免未使用时分配 60MB)
     utils::HttpMemoryPool* memoryPool_;
@@ -149,9 +131,8 @@ private:
     // 连接代际（同一 fd 号复用后的归属校验）
     uint32_t connectionGeneration_ = 0;
 
-    // 响应发布协议（见头文件上半部分说明）
-    std::shared_ptr<const std::string> pendingResponse_;
-    std::atomic<bool> pendingResponseReady_{false};
+    // 当前正在发送的响应（I/O 线程独占，见上方响应区说明）
+    std::shared_ptr<const std::string> currentResponse_;
 
     // 最近一次 I/O 活跃时间（空闲超时清理用）
     std::chrono::steady_clock::time_point lastActive_{std::chrono::steady_clock::now()};

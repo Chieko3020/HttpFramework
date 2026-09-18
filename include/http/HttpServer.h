@@ -74,6 +74,14 @@ public:
     const Statistics& getStatistics() const { return stats_; }
 
 private:
+    // 待发送的响应（H5）：worker 生成字节后只把它投递到这里，
+    // 由 I/O 线程取出并写入连接。worker 因此完全不触碰 HttpContext 的字段。
+    struct PendingResponse {
+        net::ConnId connId{0};
+        std::shared_ptr<const std::string> data;
+        bool keepAlive{false};
+    };
+
     // ---- SubReactor ----
     struct SubReactor {
         int epollFd = -1;
@@ -82,9 +90,9 @@ private:
         std::thread thread;
         std::map<int, std::unique_ptr<HttpContext>> contexts;
         std::mutex contextsMutex;
-        std::mutex wakeMutex;      // 保护 pendingWrites 队列
-        // 待发送响应的连接标识（含代际），见 utils/SocketCompat.h 的 ConnId
-        std::vector<net::ConnId> pendingWrites;
+        std::mutex wakeMutex;      // 保护 pendingResponses 队列
+        // 待发送的响应（含连接代际），见 utils/SocketCompat.h 的 ConnId
+        std::vector<PendingResponse> pendingResponses;
     };
 
     // fd 的进程级归属记录：代际 + 所属 sub reactor。
@@ -186,14 +194,19 @@ private:
     bool ownsConnection(int fd, int subReactorIndex, net::ConnId connId) const;
     // 该 fd 上是否已存在一个"别的"连接（用于区分陈旧 fd 与自由 fd）
     bool fdTakenByOther(int fd, int subReactorIndex) const;
-    // 把 fd 从本 reactor 的 pendingWrites 中移除（连接关闭 / fd 被新连接复用）
-    void dropPendingWrites(int subReactorIndex, int fd);
+    // 把 fd 从本 reactor 的待发送队列中移除（连接关闭 / fd 被新连接复用）
+    void dropPendingResponses(int subReactorIndex, int fd);
     // 按 (fd, 代际) 增减该连接的在途请求计数（H4）
     void markInFlight(int subReactorIndex, net::ConnId connId, bool enter);
-    // 唤醒 sub reactor 去发送该连接的响应
-    void notifyConnectionReady(int subReactorIndex, net::ConnId connId);
+    // 唤醒 sub reactor 去发送该连接的响应（H5：响应内容随队列一起交付）
+    void notifyConnectionReady(int subReactorIndex, net::ConnId connId,
+                               std::shared_ptr<const std::string> data, bool keepAlive);
     // 取该 fd 当前连接代际（不存在时返回 0）
     net::ConnId connIdOf(int subReactorIndex, int fd) const;
+    // 取该 fd 当前连接的 HttpContext（不存在返回 nullptr）
+    HttpContext* lookupContext(int subReactorIndex, int fd);
+    // 把 ctx 上当前的响应尽量写出去（部分写时挂 EPOLLOUT）
+    void writeCurrentResponse(int clientFd, int subReactorIndex, HttpContext* ctx);
 
     // ---- I/O 辅助 ----
     std::string readAllData(int fd, size_t* totalRead = nullptr);
