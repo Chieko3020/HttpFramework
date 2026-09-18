@@ -804,6 +804,16 @@ bash scripts/generate_report.sh
 
 > **注意**：使用 `--template` 选项时需在 build 目录下运行（`cd build && ./examples/bench_server ...`），
 > 确保 `templates/` 目录可访问。WSS 测试需先生成自签名证书。
+>
+> 脚本行为（2026-09-18 起）：结果目录由分支名显式映射（`main` → `results/main`、
+> `feature/WebSocket` → `results/wss`）；每个结果文件头会写入环境锚定信息
+> （CPU 型号与核数、gcc 版本、`git rev-parse HEAD`、wrk 版本、CPU governor），
+> 便于日后确认数据对应的代码版本与机器；缺少工具（如未安装 `wrk`/`wscat`）时
+> 相关项写"跳过 + 原因 + 修复"并按退出码 3 结束，不会产出空数据或 0 值。
+> 公共函数在 `scripts/bench_env.sh`（由各脚本 source，不需要单独执行）。
+> `wss_bench_client` 的用法为
+> `wss_bench_client <host> <port> <path> [count] [msg_size] [rounds] [warmup]`，
+> 默认 `count=1000` 并先跑一轮预热（预热不计入统计）。
 
 基准服务器 CLI 选项：
 
