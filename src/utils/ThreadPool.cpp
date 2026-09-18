@@ -70,6 +70,20 @@ size_t ThreadPool::getQueueSize() const {
     return tasks_.size();
 }
 
+// 与 enqueue 的唯一区别：不构造 packaged_task / future。
+// 任务体的异常由 workerFunction 统一捕获（与 enqueue 路径相同）。
+void ThreadPool::enqueueDetached(std::function<void()> task) {
+    {
+        std::lock_guard<std::mutex> lock(queueMutex_);
+        if (!running_.load()) {
+            throw std::runtime_error("enqueue on stopped ThreadPool");
+        }
+        tasks_.push(std::move(task));
+        activeTasks_.fetch_add(1);
+    }
+    condition_.notify_one();
+}
+
 void ThreadPool::shutdown() {
     if (!running_.load()) {
         return;

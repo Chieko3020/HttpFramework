@@ -950,7 +950,8 @@ void HttpServer::enqueueRequestTask(int subReactorIndex, int clientFd, net::Conn
     // stop() 不会在它开始执行前就放行析构（H3）。
     inFlightTasks_.fetch_add(1, std::memory_order_acq_rel);
     try {
-        threadPool_->enqueue([this, subReactorIndex, connId, task]() {
+        // enqueueDetached：请求任务不关心返回值，走无 packaged_task/future 的提交路径
+        threadPool_->enqueueDetached([this, subReactorIndex, connId, task]() {
             // 保证计数一定被递减：execute() 内的异常会逃到线程池的 catch，
             // 那就再也回不到 finishInFlightTask()（会把 stop() 卡到超时）
             try {

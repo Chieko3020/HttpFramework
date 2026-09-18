@@ -154,6 +154,39 @@ static bool test_get_thread_count() {
     return true;
 }
 
+static bool test_enqueue_detached() {
+    TEST("enqueueDetached 提交任务且不返回 future");
+    utils::ThreadPool pool(2);
+
+    std::atomic<int> counter{0};
+    const int N = 50;
+    for (int i = 0; i < N; ++i) {
+        pool.enqueueDetached([&counter]() { counter.fetch_add(1); });
+    }
+    pool.waitForAllTasks();
+    CHECK(counter.load() == N, "期望 " << N << " 个任务完成, 实际 " << counter.load());
+
+    // 任务体内的异常不能逃逸（由 worker 捕获），且不影响后续任务
+    std::atomic<int> after{0};
+    pool.enqueueDetached([]() { throw std::runtime_error("boom"); });
+    pool.enqueueDetached([&after]() { after.fetch_add(1); });
+    pool.waitForAllTasks();
+    CHECK(after.load() == 1, "异常任务之后的任务应照常执行, 实际 " << after.load());
+
+    // 关闭后与 enqueue 同语义：抛 runtime_error
+    pool.shutdown();
+    bool threw = false;
+    try {
+        pool.enqueueDetached([]() {});
+    } catch (const std::runtime_error&) {
+        threw = true;
+    }
+    CHECK(threw, "shutdown 后 enqueueDetached 应抛出 runtime_error");
+
+    PASS();
+    return true;
+}
+
 int main() {
     std::cout << "=== test_infra_threadpool ===" << std::endl;
 
@@ -173,6 +206,7 @@ int main() {
     run(test_is_running,             "运行状态");
     run(test_wait_for_all_tasks,     "等待全部任务完成");
     run(test_get_thread_count,       "获取线程数");
+    run(test_enqueue_detached,       "enqueueDetached 提交");
 
     std::cout << std::endl
               << "结果: " << g_testsPassed << " 通过, "
