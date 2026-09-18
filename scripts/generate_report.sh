@@ -74,6 +74,29 @@ pct_diff() {
     }'
 }
 
+# 单个结果文件的环境锚定值（无 环境-git-HEAD 行 → 空 = 未锚定）
+file_head() {
+    grep -oP '^环境-git-HEAD:[ \t]*\K.*' "$1" 2>/dev/null | head -1 || true
+}
+
+# 带锚定的百分比差异：两个结果文件都必须存在、都带 环境-git-HEAD 行，且
+# **HEAD 相同**，才输出百分比；否则输出"数据缺失（结果文件未锚定）"。
+# 动机：仓库里 results/ 下有一批 2026-05 入库、无环境行的旧 txt，用它们"实算"
+# 出的收益数字无法与当前代码对应（曾经算出"内存池 +55.4%"，而交替复测结论是
+# 内存池无收益），这类数字不能出现在结论里。
+anchored_pct() {
+    local f1="$1" f2="$2" v1="$3" v2="$4" h1 h2
+    if [ ! -f "$f1" ] || [ ! -f "$f2" ]; then echo "数据缺失（结果文件不存在）"; return; fi
+    h1=$(file_head "$f1"); h2=$(file_head "$f2")
+    if [ -z "$h1" ] || [ -z "$h2" ]; then
+        echo "数据缺失（结果文件未锚定：缺 环境-git-HEAD 行）"; return
+    fi
+    if [ "$h1" != "$h2" ]; then
+        echo "数据缺失（两侧 HEAD 不同：${h1} vs ${h2}）"; return
+    fi
+    pct_diff "$v1" "$v2"
+}
+
 # 结果文件里的环境锚定字段（取第一个非空值；旧结果文件没有这些行 → 数据缺失）
 env_field() {
     local v
@@ -119,7 +142,9 @@ echo "| wrk | $(env_field 环境-wrk) |"
 echo "| CPU governor | $(env_field 环境-governor) |"
 echo ""
 echo "> 说明：早于环境锚定改造的结果文件没有 环境-* 行，本表会显示\"数据缺失\"，"
-echo "> 这类文件不能与新结果直接比较。"
+echo "> 这类文件不能与新结果直接比较。所有 \"+x.x%\" 形式的结论都只由"
+echo "> **两侧都带 环境-git-HEAD 且 HEAD 一致**的结果文件算出；否则该位置写"
+echo "> \"数据缺失（结果文件未锚定）\"，不产出任何收益数字。"
 echo ""
 
 # ── A1 ──
@@ -215,8 +240,12 @@ echo "|------|-------------|-------------|"
 echo "| OFF | ${mo:-数据缺失} | ${wo:-数据缺失} |"
 echo "| ON  | ${mn:-数据缺失} | ${wn:-数据缺失} |"
 echo ""
-echo "- main 内存池收益: $(pct_diff "$mo" "$mn")"
-echo "- WSS  内存池收益: $(pct_diff "$wo" "$wn")"
+echo "- main 内存池收益: $(anchored_pct "$MAIN_DIR/b2_mempool_off.txt" "$MAIN_DIR/b2_mempool_on.txt" "$mo" "$mn")"
+echo "- WSS  内存池收益: $(anchored_pct "$WSS_DIR/b2_mempool_off.txt" "$WSS_DIR/b2_mempool_on.txt" "$wo" "$wn")"
+echo ""
+echo "> 口径：本段只在两侧结果文件都带 环境-git-HEAD 且 HEAD 一致时才给百分比。"
+echo "> 早期入库的 b2 结果（无 环境-* 行）不足以下收益结论 —— 需要时请重跑"
+echo "> scripts/run_bench.sh 的 B2 段落后再看这一节。"
 echo ""
 
 # ── B3 ──
@@ -342,8 +371,8 @@ echo "| HTTP p50 延迟 (main) | $(present "$(latency_at 50 "$MAIN_DIR/a3_latenc
 echo "| WSS p50 延迟 (256B) | $(present "$(wss_latency_quantile "$WSS_DIR/d1_throughput_256B.txt" q50)") ms |"
 mo=$(rps "$MAIN_DIR/b2_mempool_off.txt"); mn=$(rps "$MAIN_DIR/b2_mempool_on.txt")
 wo=$(rps "$WSS_DIR/b2_mempool_off.txt"); wn=$(rps "$WSS_DIR/b2_mempool_on.txt")
-echo "| 内存池加速 (main) | $(pct_diff "$mo" "$mn")（off ${mo:-数据缺失} → on ${mn:-数据缺失} req/s） |"
-echo "| 内存池加速 (WSS) | $(pct_diff "$wo" "$wn")（off ${wo:-数据缺失} → on ${wn:-数据缺失} req/s） |"
+echo "| 内存池加速 (main) | $(anchored_pct "$MAIN_DIR/b2_mempool_off.txt" "$MAIN_DIR/b2_mempool_on.txt" "$mo" "$mn")（off ${mo:-数据缺失} → on ${mn:-数据缺失} req/s） |"
+echo "| 内存池加速 (WSS) | $(anchored_pct "$WSS_DIR/b2_mempool_off.txt" "$WSS_DIR/b2_mempool_on.txt" "$wo" "$wn")（off ${wo:-数据缺失} → on ${wn:-数据缺失} req/s） |"
 echo "| WSS vs main (1000 conn 纯文本) | $(pct_diff "$mhc" "$whc") |"
 echo "| 5000 并发 (main) | $(present "$(extract_rps "并发: 5000" "$MAIN_DIR/a4_maxconn.txt")") req/s；Socket errors: $(present "$(socket_errors_after "$MAIN_DIR/a4_maxconn.txt" "并发: 5000")") |"
 echo "| WSS 并发升级 (D3) | $(value_or_missing "$WSS_DIR/d3_maxconn.txt" "成功建立") 成功 / $(value_or_missing "$WSS_DIR/d3_maxconn.txt" "未能判定") |"
