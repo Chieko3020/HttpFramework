@@ -533,6 +533,87 @@ static bool test_fragment_limit(const std::string& cert, const std::string& key)
     return true;
 }
 
+// ③ flushOutbound 改成"锁内搬运、锁外 SSL_write"后的正确性回归。
+//
+// 可判别性设计：
+//   1) handler 在同一把锁内完成"取号 + sendText"，于是序号就是入队顺序；
+//   2) 客户端连发 2 条请求后**停止读取**：服务端每条回 60KB（远大于 4KB
+//      SO_SNDBUF），于是出站队列堆到 2 项，并卡在第一项的中途（WANT_WRITE）；
+//   3) 客户端再用 512B/1ms 的小步长慢慢排空，期间服务端会反复进入部分写；
+//      如果"队列顺序"被破坏（未发完的队首先行、新数据插到队首之前），
+//      到达顺序就会跟着改变；
+//   4) 按到达顺序解析帧，要求恰好是 seq-0、seq-1（序号即入队顺序）。
+// 注入故障验证（见简报）：WANT_WRITE 分支里 pop_front 丢弃未发完的项 → 该用例失败。
+static bool test_outbound_order_under_concurrency(const std::string& cert, const std::string& key) {
+    TEST("③ 队列非空且发生部分写时，出站帧顺序 == 入队顺序");
+    WssFixture f;
+    if (!f.up(cert, key)) FAIL("WSS 服务启动失败");
+    // 4KB 发送缓冲：60KB 的帧必然"只写出一部分"，队列会堆起来
+    f.reactor->setSocketSendBuffer(4096);
+
+    const std::string big(60 * 1024, 'x');
+    std::mutex seqMu;
+    uint64_t seqNext = 0;
+    f.router->addHandler("/seq", [&seqMu, &seqNext, big](http::WssConnection& conn,
+                                                         const http::wss::WsMessage& msg) {
+        if (!msg.isText()) return;
+        // 取号与入队在同一把锁内，因此序号严格等于入队顺序
+        std::lock_guard<std::mutex> lk(seqMu);
+        uint64_t n = seqNext++;
+        conn.sendText("seq-" + std::to_string(n) + ":" + big);
+    });
+
+    TlsClient c;
+    CHECK(c.connect(f.port), "TLS 连接失败");
+    CHECK(c.writeAll(wsUpgradeRequest("/seq")), "发送升级请求失败");
+    bool got = false;
+    std::string head = c.readHttpHeader(&got);
+    CHECK(got && head.rfind("HTTP/1.1 101", 0) == 0, "升级失败");
+
+    CHECK(c.writeAll(buildClientFrameRaw(0x1, "m", true)), "第 1 条消息发送失败");
+    CHECK(c.writeAll(buildClientFrameRaw(0x1, "m", true)), "第 2 条消息发送失败");
+    // 不读取：让服务端把两条回显都排进队列，并卡在第一项中途
+    std::this_thread::sleep_for(std::chrono::milliseconds(500));
+
+    http::wss::WebSocketStreamParser parser(false);
+    parser.setOpenMode();
+    std::string local = c.buf;
+    c.buf.clear();
+    std::vector<uint64_t> gotSeq;
+    auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(30);
+    while (gotSeq.size() < 2 && std::chrono::steady_clock::now() < deadline) {
+        std::string accept;
+        std::vector<http::wss::WsFrame> frames;
+        try {
+            parser.feed(reinterpret_cast<const uint8_t*>(local.data()), local.size(), &accept, &frames);
+        } catch (...) { break; }
+        local.clear();
+        for (const auto& fr : frames) {
+            if (fr.opcode != 0x1) continue;
+            std::string text(fr.payload.begin(), fr.payload.end());
+            if (text.rfind("seq-", 0) != 0) { gotSeq.push_back(9999); continue; }
+            auto colon = text.find(':');
+            gotSeq.push_back(std::stoull(text.substr(4, colon - 4)));
+        }
+        if (gotSeq.size() >= 2) break;
+        // 小步长慢读：让服务端反复进入"部分写"分支
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        char tmp[512];
+        int n = SSL_read(c.ssl, tmp, sizeof(tmp));
+        if (n <= 0) break;
+        local.append(tmp, static_cast<size_t>(n));
+    }
+    std::cout << "(序号帧=" << gotSeq.size() << ") ";
+    c.closeAll();
+    f.down();
+
+    CHECK(gotSeq.size() == 2, "应恰好收到 2 条序号帧, 实际 " << gotSeq.size());
+    CHECK(gotSeq.size() == 2 && gotSeq[0] == 0 && gotSeq[1] == 1,
+          "序号帧顺序应为 0,1");
+    PASS();
+    return true;
+}
+
 int main() {
     std::cout << "=== test_wss_hardening ===" << std::endl;
 
@@ -557,6 +638,7 @@ int main() {
     run(test_fragment_limit,                     "H12 分片累计上限", cert, key);
     run(test_l9_payload_checks,                  "L9 UTF-8/长度编码", cert, key);
     run(test_upgrade_header_limit,               "M18 升级头上限", cert, key);
+    run(test_outbound_order_under_concurrency,   "③ 并发出站顺序", cert, key);
 
     { int rc = system(("rm -f " + cert + " " + key).c_str()); (void)rc; }
 

@@ -11,6 +11,7 @@
 #include <string>
 #include <thread>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include <openssl/ssl.h>
@@ -36,6 +37,12 @@ struct WssReactorState {
     bool wake_fd_open{false};   // wake_fd 是否仍打开（保留到析构，见 WssReactor.cpp）
 
     std::unordered_map<int, std::shared_ptr<WssConnection>> conns;
+    // 已完成 TLS 握手、尚未进入 closing 的连接 fd 集合。
+    // 心跳与出站冲刷只遍历这个集合：升级中的连接（tls_done=false）与正在关闭
+    // 的连接（closing=true）都不会被转发/心跳触及，原来每轮 timer/wake 都要
+    // 遍历全部连接并逐个判断这两个标志（连接数上千时是 O(N) 无效遍历）。
+    // 只在 I/O 线程读写（连接建立、握手完成、关闭路径都发生在该线程）。
+    std::unordered_set<int> activeFds;
     uint64_t nextConnId{1};
     // 用于在断开时回调 onClose（非拥有指针，由 WssReactor 持有 shared_ptr）（H11）
     WsRouter* wsRouter{nullptr};
@@ -70,6 +77,9 @@ public:
     void setWsIdleTimeout(int seconds);
     void setWsPingInterval(int seconds);
     void setTlsConfig(const TlsConfig& cfg);
+    // 测试用：把新连接的 SO_SNDBUF 收窄，强制 SSL_write 走"只写出一部分 →
+    // 挂 EPOLLOUT 续发"的路径（默认 0 = 不动，按内核默认值）
+    void setSocketSendBuffer(int bytes) { socketSendBuf_ = bytes; }
 
     // 从线程池回调，唤醒 IO 线程冲刷出站队列
     void notifyOutbound();
@@ -95,6 +105,7 @@ private:
 
     int wsIdleTimeoutSec_ = 120;
     int wsPingIntervalSec_ = 0;
+    int socketSendBuf_ = 0;   // 0 = 不设置（内核默认）
 };
 
 }  // namespace wss

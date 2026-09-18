@@ -50,7 +50,9 @@ void WssConnection::sendText(const std::string& text) {
 void WssConnection::sendBinary(const std::vector<uint8_t>& data) {
     std::lock_guard<std::mutex> lk(state.outbound_mu);
     if (state.closing || state.fd.load() < 0 || !state.ssl) return;
-    WssOutboundItem item; item.data = data; item.offset = 0;
+    WssOutboundItem item;
+    item.data = std::make_shared<std::vector<uint8_t>>(data);
+    item.offset = 0;
     state.outbound.push_back(std::move(item));
 }
 void WssConnection::sendPing(const std::vector<uint8_t>& payload) {
@@ -63,7 +65,9 @@ void WssConnection::close(uint16_t code) {
     state.closeCode = code;   // 供 onClose 上报（H11）
     state.close_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(1);
     auto closeFrame = wss::WebSocketCodec::buildClose(code);
-    WssOutboundItem item; item.data = std::move(closeFrame); item.offset = 0;
+    WssOutboundItem item;
+    item.data = std::make_shared<std::vector<uint8_t>>(std::move(closeFrame));
+            item.offset = 0;
     state.outbound.push_back(std::move(item));
 }
 void WssConnection::setUserData(const std::string& key, const std::string& value) {
@@ -240,6 +244,7 @@ void closeConnection(WssReactorState* st, int fd) {
         c->state.closing = true;
     }
     st->conns.erase(it);
+    st->activeFds.erase(fd);
     epoll_event ev;
     std::memset(&ev, 0, sizeof(ev));
     epoll_ctl(st->epoll_fd, EPOLL_CTL_DEL, fd, &ev);
@@ -306,7 +311,9 @@ bool processWsInboundBuffer(WssReactorState* st, int fd,
         auto closeFrame = WebSocketCodec::buildClose(ex.closeCode);
         {
             std::lock_guard<std::mutex> lk(c->state.outbound_mu);
-            WssOutboundItem item; item.data = std::move(closeFrame); item.offset = 0;
+            WssOutboundItem item;
+            item.data = std::make_shared<std::vector<uint8_t>>(std::move(closeFrame));
+            item.offset = 0;
             c->state.outbound.push_back(std::move(item));
         }
         updateInterest(st->epoll_fd, c->state.fd, true);
@@ -339,7 +346,7 @@ bool processWsInboundBuffer(WssReactorState* st, int fd,
         {
             std::lock_guard<std::mutex> lk(c->state.outbound_mu);
             WssOutboundItem item;
-            item.data = std::move(respBytes);
+            item.data = std::make_shared<std::vector<uint8_t>>(std::move(respBytes));
             item.offset = 0;
             c->state.outbound.push_back(std::move(item));
             updatePeak(&st->tx_queue_peak, static_cast<uint64_t>(c->state.outbound.size()));
@@ -355,7 +362,9 @@ bool processWsInboundBuffer(WssReactorState* st, int fd,
             auto pong = WebSocketCodec::buildPong(frame.payload);
             {
                 std::lock_guard<std::mutex> lk(c->state.outbound_mu);
-                WssOutboundItem item; item.data = std::move(pong); item.offset = 0;
+                WssOutboundItem item;
+                item.data = std::make_shared<std::vector<uint8_t>>(std::move(pong));
+                item.offset = 0;
                 c->state.outbound.push_back(std::move(item));
             }
             updateInterest(st->epoll_fd, fd, true);
@@ -376,7 +385,9 @@ bool processWsInboundBuffer(WssReactorState* st, int fd,
             auto closeResp = WebSocketCodec::buildClose(code);
             {
                 std::lock_guard<std::mutex> lk(c->state.outbound_mu);
-                WssOutboundItem item; item.data = std::move(closeResp); item.offset = 0;
+                WssOutboundItem item;
+                item.data = std::make_shared<std::vector<uint8_t>>(std::move(closeResp));
+                item.offset = 0;
                 c->state.outbound.push_back(std::move(item));
             }
             updateInterest(st->epoll_fd, fd, true);
@@ -464,6 +475,8 @@ int driveTlsAccept(WssReactorState* st, std::shared_ptr<WssConnection> c) {
             else
                 st->handshake_new.fetch_add(1, std::memory_order_relaxed);
             c->state.tls_done = true;
+            // 握手完成即登记进"活跃集合"（心跳/冲刷只遍历它）
+            if (!c->state.closing && c->state.fd.load() >= 0) st->activeFds.insert(c->state.fd.load());
             updateInterest(st->epoll_fd, c->state.fd, false);
             return 1;
         }
@@ -491,35 +504,101 @@ int advanceTlsHandshake(WssReactorState* st, std::shared_ptr<WssConnection> c,
 }
 
 // ── 出站刷新 ────────────────────────────────────────────────────────
-
+//
+// 并发契约（③）：
+//   * 只有 I/O 线程调用本函数 —— 所有调用点都在 reactorLoop / 握手驱动 /
+//     processWsInboundBuffer 里，这些函数都跑在唯一的 I/O 线程上。
+//   * worker 线程只做两件事：sendBinary/sendPing/close 在锁内 push_back，
+//     以及 notifyOutbound 写 wake_fd。队列是 deque：只有 I/O 线程 pop_front，
+//     worker 只 push_back，因此"队首元素"没有被其它线程改写。
+//   * 据此把 SSL_write 挪到锁外：锁内只做"取出队首载荷 / 推进 offset /
+//     pop_front"，锁外做 SSL_write。
+//
+// 顺序保证：出站字节的先后 = 队列元素顺序。锁外期间新数据只能追加到队尾，
+// 不会被插到队首之前；offset 只在锁内推进，也不会跳序。因此即便多线程高频
+// sendBinary，帧顺序仍严格等于入队顺序（test_wss_hardening 的
+// test_outbound_order_under_concurrency，用 4KB SO_SNDBUF 强制部分写路径）。
+//
+// 两个实现约束（踩过）：
+//   1) 交给 SSL_write 的指针必须**在重试之间保持同一地址**：OpenSSL 在
+//      SSL_ERROR_WANT_WRITE 之后要求"用同样的指针与长度重试"，换地址或换长度
+//      会返回 SSL_R_BAD_WRITE_RETRY（error:0A00007F）。因此载荷放入
+//      shared_ptr<vector>（地址稳定），并且重试时传 item->data() + offset。
+//   2) 载荷不能是"栈上/本地拷贝"：队列元素可能在锁外被 pop_front() 释放
+//      （close() 清空队列），指针随即悬空。shared_ptr 让正在发送的那段字节
+//      独立于队列存活（本函数内的 sendItem 持有一份引用）。
+//
+// 代价：sendBinary 每段多一次堆分配 + 拷贝（原先队列元素内联 vector 也要拷贝
+// 一次，差别只是多一层 shared_ptr 控制块）。换来的是 SSL_write 不再持
+// outbound_mu —— 慢客户端（发送缓冲满、WANT_WRITE）不再阻塞其它线程入队。
 bool flushOutbound(WssReactorState* st, std::shared_ptr<WssConnection> c) {
     auto& s = c->state;
     if (s.fd.load() < 0 || !s.ssl) return true;
-    std::unique_lock<std::mutex> lk(s.outbound_mu);
-    if (s.closing && s.outbound.empty()) { updateInterest(st->epoll_fd, s.fd, false); return true; }
-    if (s.outbound.empty()) { updateInterest(st->epoll_fd, s.fd, false); return true; }
-    while (!s.outbound.empty()) {
-        WssOutboundItem& item = s.outbound.front();
-        const uint8_t* ptr = item.data.data() + item.offset;
-        std::size_t remaining = item.data.size() - item.offset;
-        if (remaining == 0) { s.outbound.pop_front(); continue; }
-        int ret = SSL_write(s.ssl, ptr, static_cast<int>(remaining));
-        if (ret > 0) {
-            st->tx_bytes_total.fetch_add(static_cast<uint64_t>(ret), std::memory_order_relaxed);
-            item.offset += ret;
-            if (item.offset >= item.data.size()) s.outbound.pop_front();
-            continue;
+
+    while (true) {
+        // 锁内：确认队首、取载荷引用、推进 offset
+        std::shared_ptr<std::vector<uint8_t>> payload;
+        std::size_t offset = 0;
+        bool queue_empty = false;
+        {
+            std::lock_guard<std::mutex> lk(s.outbound_mu);
+            if (s.fd.load() < 0) return true;
+            // 队首可能有已发一半的项：先跳过已完成的
+            while (!s.outbound.empty() && !s.outbound.front().data) s.outbound.pop_front();
+            while (!s.outbound.empty() &&
+                   s.outbound.front().offset >= s.outbound.front().data->size())
+                s.outbound.pop_front();
+            if (s.outbound.empty()) {
+                queue_empty = true;
+            } else {
+                WssOutboundItem& it = s.outbound.front();
+                payload = it.data;          // 持有一份引用，元素被弹出也不会悬空
+                offset = it.offset;
+            }
         }
-        int err = SSL_get_error(s.ssl, ret);
-        if (err == SSL_ERROR_WANT_WRITE) { updateInterest(st->epoll_fd, s.fd, true); return false; }
-        if (err == SSL_ERROR_WANT_READ) { updateInterest(st->epoll_fd, s.fd, false); return false; }
-        // 致命错误（非 WANT_READ/WANT_WRITE）：不能既不弹队列也不关连接，
-        // 否则出站队列永远不再前进，连接静默挂死到空闲超时（M14）。
-        std::cerr << "[ERROR][WSS]：SSL_write致命错误, 关闭连接, id=" << c->id() << std::endl;
-        s.closing = true;
-        s.close_deadline = std::chrono::steady_clock::now() + kCloseGrace;
-        return false;
+
+        if (queue_empty) break;
+        if (!payload || offset >= payload->size()) continue;
+
+        // ── 锁外 SSL_write：同一 payload->data()+offset、同一长度重试 ──
+        char* const base = reinterpret_cast<char*>(payload->data());
+        const std::size_t left = payload->size() - offset;
+        int ret = SSL_write(s.ssl, base + offset, static_cast<int>(left));
+        if (ret <= 0) {
+            int err = SSL_get_error(s.ssl, ret);
+            if (err == SSL_ERROR_WANT_WRITE) { updateInterest(st->epoll_fd, s.fd, true); return false; }
+            if (err == SSL_ERROR_WANT_READ) { updateInterest(st->epoll_fd, s.fd, false); return false; }
+            // 致命错误（非 WANT_READ/WANT_WRITE）：不能既不弹队列也不关连接，
+            // 否则出站队列永远不再前进，连接静默挂死到空闲超时（M14）。
+            std::cerr << "[ERROR][WSS]：SSL_write致命错误, 关闭连接, id=" << c->id() << std::endl;
+            {
+                std::lock_guard<std::mutex> lk(s.outbound_mu);
+                s.closing = true;
+                s.close_deadline = std::chrono::steady_clock::now() + kCloseGrace;
+            }
+            return false;
+        }
+
+        st->tx_bytes_total.fetch_add(static_cast<uint64_t>(ret), std::memory_order_relaxed);
+        // 锁内：按已发出的字节数推进 offset（只有本线程推进队首）
+        {
+            std::lock_guard<std::mutex> lk(s.outbound_mu);
+            if (!s.outbound.empty() && s.outbound.front().data) {
+                WssOutboundItem& it = s.outbound.front();
+                if (it.offset + static_cast<std::size_t>(ret) <= it.data->size())
+                    it.offset += static_cast<std::size_t>(ret);
+                else
+                    it.offset = it.data->size();
+                if (it.offset >= it.data->size()) s.outbound.pop_front();
+            }
+        }
+        if (static_cast<std::size_t>(ret) < left) {
+            // 只写出去一部分：等 EPOLLOUT 再续（重试仍用同一 payload 与 offset）
+            updateInterest(st->epoll_fd, s.fd, true);
+            return false;
+        }
     }
+
     updateInterest(st->epoll_fd, s.fd, false);
     return true;
 }
@@ -648,39 +727,42 @@ void WssReactor::reactorLoop() {
                 auto now = std::chrono::steady_clock::now();
                 const auto pingIv = std::chrono::seconds(st.pingIntervalSec);
 
-                for (auto& kv : st.conns) {
-                    auto& c = kv.second;
-                    auto& s = c->state;
-                    if (!s.tls_done || !s.ws_upgraded || s.closing) continue;
-                    auto since = std::chrono::duration_cast<std::chrono::seconds>(now - s.last_server_ping_sent);
-                    if (since < pingIv) continue;
-                    auto pf = WebSocketCodec::buildPing({});
-                    { std::lock_guard<std::mutex> lk(s.outbound_mu);
-                      WssOutboundItem oi; oi.data = std::move(pf); oi.offset = 0;
-                      s.outbound.push_back(std::move(oi)); }
-                    s.last_server_ping_sent = now; s.last_ping = now;
-                    updateInterest(st.epoll_fd, kv.first, true);
-                }
-                for (auto& kv : st.conns) {
-                    if (!kv.second->state.tls_done || kv.second->state.closing) continue;
-                    flushOutbound(&st, kv.second);
-                }
+                // 合并成一次遍历（原来三次全表遍历：发心跳、flushOutbound、判空闲）。
+                // 心跳与冲刷只针对活跃连接，关闭态连接单独收集并清理。
+                std::vector<std::shared_ptr<WssConnection>> toFlush;
                 std::vector<int> toClose;
-                for (const auto& kv : st.conns) {
-                    auto& s = kv.second->state;
+                for (int cfd : st.activeFds) {
+                    auto it = st.conns.find(cfd);
+                    if (it == st.conns.end()) continue;
+                    auto& c = it->second;
+                    auto& s = c->state;
                     if (s.closing) {
-                        // 关闭态：关闭帧已发出就直接收尾；否则超过宽限期强制关闭（H11/M14）
                         bool drained;
                         {
                             std::lock_guard<std::mutex> lk(s.outbound_mu);
                             drained = s.outbound.empty();
                         }
-                        if (drained || now > s.close_deadline) toClose.push_back(kv.first);
+                        if (drained || now > s.close_deadline) toClose.push_back(cfd);
                         continue;
                     }
+                    if (!s.tls_done || !s.ws_upgraded) continue;
+                    auto since = std::chrono::duration_cast<std::chrono::seconds>(
+                        now - s.last_server_ping_sent);
+                    if (since >= pingIv) {
+                        auto pf = WebSocketCodec::buildPing({});
+                        { std::lock_guard<std::mutex> lk(s.outbound_mu);
+                          WssOutboundItem oi;
+                          oi.data = std::make_shared<std::vector<uint8_t>>(std::move(pf));
+                          oi.offset = 0;
+                          s.outbound.push_back(std::move(oi)); }
+                        s.last_server_ping_sent = now; s.last_ping = now;
+                        updateInterest(st.epoll_fd, cfd, true);
+                    }
                     auto diff = std::chrono::duration_cast<std::chrono::seconds>(now - s.last_ping);
-                    if (diff.count() > st.idleTimeoutSec) toClose.push_back(kv.first);
+                    if (diff.count() > st.idleTimeoutSec) { toClose.push_back(cfd); continue; }
+                    toFlush.push_back(c);
                 }
+                for (auto& c : toFlush) flushOutbound(&st, c);
                 for (int cfd : toClose) closeConnection(&st, cfd);
 
                 // 文件传输会话周期清理
@@ -706,10 +788,22 @@ void WssReactor::reactorLoop() {
 
             if (fd == st.wake_fd) {
                 while (true) { uint64_t x; if (::read(st.wake_fd, &x, sizeof(x)) <= 0) break; }
-                for (auto& kv : st.conns) {
-                    if (!kv.second->state.tls_done || kv.second->state.closing) continue;
-                    flushOutbound(&st, kv.second);
+                // 只处理有出站数据的连接：activeFds 已经排除了未握手/关闭中的连接。
+                // 每个连接的 outbound_mu 在循环体内短持有、随即释放，不需要全局锁。
+                std::vector<std::shared_ptr<WssConnection>> toFlush;
+                for (int cfd : st.activeFds) {
+                    auto it = st.conns.find(cfd);
+                    if (it == st.conns.end()) continue;
+                    auto& s = it->second->state;
+                    if (s.closing) continue;
+                    bool has_data;
+                    {
+                        std::lock_guard<std::mutex> olk(s.outbound_mu);
+                        has_data = !s.outbound.empty();
+                    }
+                    if (has_data) toFlush.push_back(it->second);
                 }
+                for (auto& c : toFlush) flushOutbound(&st, c);
                 continue;
             }
 
@@ -719,6 +813,11 @@ void WssReactor::reactorLoop() {
                     int cfd = ::accept(st.listen_fd, reinterpret_cast<sockaddr*>(&peer), &peer_len);
                     if (cfd < 0) { if (errno == EAGAIN || errno == EWOULDBLOCK) break; break; }
                     if (setNonBlocking(cfd) < 0) { ::close(cfd); continue; }
+                    if (socketSendBuf_ > 0) {
+                        // 测试用：收窄发送缓冲，让大帧必然出现"部分写"（见 setSocketSendBuffer）
+                        int snd = socketSendBuf_;
+                        ::setsockopt(cfd, SOL_SOCKET, SO_SNDBUF, &snd, sizeof(snd));
+                    }
                     SSL* ssl = SSL_new(st.ctx);
                     if (!ssl) { ::close(cfd); continue; }
                     SSL_set_accept_state(ssl);

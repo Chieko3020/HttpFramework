@@ -24,8 +24,15 @@ namespace http {
 namespace wss { class WssReactor; }
 
 // 出站队列项
+//
+// data 用 shared_ptr 而非内联 vector：flushOutbound 在**不持 outbound_mu** 的
+// 情况下把指针交给 SSL_write，而队列元素可能在锁外被 pop_front() 释放
+// （close() 会清空队列）。shared_ptr 让"正在发送的那段字节"独立于队列存活，
+// 指针不会悬空，同时地址在整个元素的发送过程中保持稳定 —— OpenSSL 要求
+// SSL_ERROR_WANT_WRITE 之后用"同样的指针与长度"重试，否则直接报
+// SSL_R_BAD_WRITE_RETRY（error:0A00007F，本机实测）。
 struct WssOutboundItem {
-    std::vector<uint8_t> data;
+    std::shared_ptr<std::vector<uint8_t>> data;
     std::size_t offset{0};
 };
 
