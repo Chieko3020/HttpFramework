@@ -148,20 +148,58 @@ void HttpResponse::clear() {
 }
 
 std::string HttpResponse::getReasonPhrase(int statusCode) const {
+    // RFC 9110 §15 常用状态码（此前缺 3xx，redirect() 默认 302 会输出
+    // "HTTP/1.1 302 Unknown"，不合规且易被客户端/代理拒绝）（M9）
     switch (statusCode) {
+        // 2xx
         case 200: return "OK";
         case 201: return "Created";
+        case 202: return "Accepted";
+        case 203: return "Non-Authoritative Information";
         case 204: return "No Content";
+        case 205: return "Reset Content";
+        case 206: return "Partial Content";
+        // 3xx
+        case 300: return "Multiple Choices";
+        case 301: return "Moved Permanently";
+        case 302: return "Found";
+        case 303: return "See Other";
+        case 304: return "Not Modified";
+        case 307: return "Temporary Redirect";
+        case 308: return "Permanent Redirect";
+        // 4xx
         case 400: return "Bad Request";
         case 401: return "Unauthorized";
+        case 402: return "Payment Required";
         case 403: return "Forbidden";
         case 404: return "Not Found";
         case 405: return "Method Not Allowed";
+        case 406: return "Not Acceptable";
+        case 408: return "Request Timeout";
+        case 409: return "Conflict";
+        case 410: return "Gone";
+        case 411: return "Length Required";
+        case 412: return "Precondition Failed";
+        case 413: return "Content Too Large";
+        case 414: return "URI Too Long";
+        case 415: return "Unsupported Media Type";
+        case 416: return "Range Not Satisfiable";
+        case 418: return "I'm a teapot";
+        case 422: return "Unprocessable Content";
+        case 426: return "Upgrade Required";
+        case 428: return "Precondition Required";
+        case 429: return "Too Many Requests";
+        case 431: return "Request Header Fields Too Large";
+        // 5xx
         case 500: return "Internal Server Error";
         case 501: return "Not Implemented";
         case 502: return "Bad Gateway";
         case 503: return "Service Unavailable";
-        default: return "Unknown";
+        case 504: return "Gateway Timeout";
+        case 505: return "HTTP Version Not Supported";
+        // 未知码：不再输出 "Unknown"（那是非标准的伪原因短语），
+        // 按 RFC 9110 允许空原因短语，状态行仍带完整数字码
+        default: return "";
     }
 }
 

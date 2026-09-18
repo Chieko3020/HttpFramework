@@ -132,8 +132,12 @@ private:
     // 字符串转小写
     static std::string toLowerCase(const std::string& str);
     
-    // URL解码
-    std::string urlDecode(const std::string& str);
+    // URL解码（M11）：
+    //   skipEncodedSlash=true —— 保留 %2F 原样（路径解码用，避免编码斜杠改变分段语义）
+    //   plusAsSpace=true      —— 把 '+' 解成空格（application/x-www-form-urlencoded 的
+    //                            查询串语义；路径里的 '+' 是字面量，不做替换）
+    std::string urlDecode(const std::string& str, bool skipEncodedSlash = false,
+                          bool plusAsSpace = true);
     
     // chunked transfer encoding 解码
     bool decodeChunkedBody();

@@ -1,4 +1,5 @@
 #include "http/HttpRequest.h"
+#include <cstring>
 #include <sstream>
 #include <algorithm>
 #include <cctype>
@@ -216,14 +217,17 @@ bool HttpRequest::parseRequestLine(const std::string& line) {
     methodString_ = method;
     version_ = version;
     
-    // 解析路径和查询参数
+    // 解析路径和查询参数。
+    // 路径按 RFC 3986 做百分号解码后再交给路由（%2F 保留原样），
+    // 这样 /users/a%20b 能匹配 /users/:id 并拿到 "a b" 而不是 "%20"（M11）
     size_t queryPos = path.find('?');
     if (queryPos != std::string::npos) {
-        path_ = path.substr(0, queryPos);
+        path_ = urlDecode(path.substr(0, queryPos), /*skipEncodedSlash=*/true,
+                          /*plusAsSpace=*/false);
         std::string queryString = path.substr(queryPos + 1);
         parseQueryParams(queryString);
     } else {
-        path_ = path;
+        path_ = urlDecode(path, /*skipEncodedSlash=*/true, /*plusAsSpace=*/false);
     }
     
     return true;
@@ -269,7 +273,9 @@ void HttpRequest::parseQueryParams(const std::string& queryString) {
 
 HttpMethod HttpRequest::stringToMethod(const std::string& method) {
     std::string upperMethod = method;
-    std::transform(upperMethod.begin(), upperMethod.end(), upperMethod.begin(), ::toupper);
+    // ::toupper 传负值 char 是 UB（非 ASCII 字节可触发）→ 先转 unsigned char（M11）
+    std::transform(upperMethod.begin(), upperMethod.end(), upperMethod.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::toupper(c)); });
     
     if (upperMethod == "GET") return HttpMethod::GET;
     if (upperMethod == "POST") return HttpMethod::POST;
@@ -284,32 +290,45 @@ HttpMethod HttpRequest::stringToMethod(const std::string& method) {
 
 std::string HttpRequest::toLowerCase(const std::string& str) {
     std::string result = str;
-    std::transform(result.begin(), result.end(), result.begin(), ::tolower);
+    std::transform(result.begin(), result.end(), result.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
     return result;
 }
 
-std::string HttpRequest::urlDecode(const std::string& str) {
+// %XX 解码。严格化（M11）：
+//   - 必须是恰好两位十六进制，否则原样保留（旧实现用 strtol，接受 "+1"、前导空白与
+//     符号，"%+1" 会被解成 0x01）；
+//   - skipEncodedSlash：路径解码时保留 %2F 原样，避免编码斜杠改变路由分段语义
+std::string HttpRequest::urlDecode(const std::string& str, bool skipEncodedSlash,
+                                   bool plusAsSpace) {
+    static const char* kHex = "0123456789abcdefABCDEF";
     std::string result;
     result.reserve(str.length());
-    
+
+    auto hexVal = [](char c) -> int {
+        if (c >= '0' && c <= '9') return c - '0';
+        if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+        if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+        return -1;
+    };
+
     for (size_t i = 0; i < str.length(); ++i) {
-        if (str[i] == '%' && i + 2 < str.length()) {
-            std::string hex = str.substr(i + 1, 2);
-            char* end;
-            long value = std::strtol(hex.c_str(), &end, 16);
-            if (*end == '\0') {
-                result += static_cast<char>(value);
-                i += 2;
+        if (str[i] == '%' && i + 2 < str.length() &&
+            strchr(kHex, str[i + 1]) && strchr(kHex, str[i + 2])) {
+            int value = (hexVal(str[i + 1]) << 4) | hexVal(str[i + 2]);
+            if (skipEncodedSlash && value == '/') {
+                result.append(str, i, 3);   // 保留 %2F 原样
             } else {
-                result += str[i];
+                result += static_cast<char>(value);
             }
-        } else if (str[i] == '+') {
+            i += 2;
+        } else if (str[i] == '+' && plusAsSpace) {
             result += ' ';
         } else {
             result += str[i];
         }
     }
-    
+
     return result;
 }
 

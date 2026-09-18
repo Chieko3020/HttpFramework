@@ -946,6 +946,61 @@ static bool test_request_framing_hardening() {
     return true;
 }
 
+// ── M9 / M11：原因短语与 URL 解码 ──
+static bool test_reason_phrase_and_url_decode() {
+    TEST("M9 302 原因短语为 Found；M11 路径解码严格化（%+1 不再解成 0x01）");
+    Fixture f;
+    if (!f.up(60, 1, false, 4, [](router::Router& r) {
+            r.get("/echo/:id", [](const http::HttpRequest& req, http::HttpResponse& res) {
+                res.setText(req.getParam("id"));
+            });
+            r.get("/redir", [](const http::HttpRequest&, http::HttpResponse& res) {
+                res.redirect("/echo/x");
+            });
+        })) FAIL("服务器启动失败");
+
+    // 302 的 reason phrase（修复前是 "Unknown"）
+    {
+        int s = connectTo(f.port);
+        CHECK(s >= 0, "连接失败");
+        CHECK(sendAll(s, req("GET", "/redir")), "发送失败");
+        auto r = readResponse(s, 3000);
+        std::cout << "(302 状态行='" << r.status << "') ";
+        CHECK(r.status == "HTTP/1.1 302 Found",
+              "302 的原因短语应标准, 实际: '" << r.status << "'");
+        close(s);
+    }
+
+    // 路径百分号解码：/echo/a%20b → 参数 "a b"
+    {
+        int s = connectTo(f.port);
+        CHECK(s >= 0, "连接失败");
+        CHECK(sendAll(s, req("GET", "/echo/a%20b")), "发送失败");
+        auto r = readResponse(s, 3000);
+        CHECK(r.complete && r.body == "a b",
+              "路径应被百分号解码, 实际 body='" << r.body << "'");
+        close(s);
+    }
+
+    // 宽松解码修正：%+1 必须原样保留（旧实现 strtol 会把 "+1" 读成 0x01）
+    {
+        int s = connectTo(f.port);
+        CHECK(s >= 0, "连接失败");
+        CHECK(sendAll(s, req("GET", "/echo/%+1")), "发送失败");
+        auto r = readResponse(s, 3000);
+        std::cout << "(%+1 → '" << r.body << "') ";
+        CHECK(r.complete, "响应未收到");
+        CHECK(r.body == "%+1",
+              "非法百分号序列应原样保留（不得解成控制字符）, 实际 body 长度="
+                  << r.body.size() << " 内容='" << r.body << "'");
+        close(s);
+    }
+
+    f.down();
+    PASS();
+    return true;
+}
+
 int main() {
     std::cout << "=== test_http_hardening ===" << std::endl;
     ignoreSigpipeInTest();
@@ -971,6 +1026,7 @@ int main() {
     run(test_router_dynamic_registration, "H14 路由运行期注册");
     run(test_app_stats_and_signal,    "H15 App 统计与信号");
     run(test_request_framing_hardening, "M3 请求框架头加固");
+    run(test_reason_phrase_and_url_decode, "M9/M11 原因短语与解码");
 
     std::cout << std::endl
               << "结果: " << g_testsPassed << " 通过, "
