@@ -6,14 +6,42 @@
 set -euo pipefail
 
 BRANCH="${1:-unknown}"
-RESULT_DIR="${2:-results/$BRANCH}"
 PROJECT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+
+# 公共函数：结果目录映射 + 结果文件环境锚定（与 run_wss_bench / bench_all 共用一份）
+. "$PROJECT_DIR/scripts/bench_env.sh"
+
+RESULT_DIR="${2:-$(bench_result_dir "$BRANCH")}"
 BENCH_SERVER="${BENCH_SERVER:-$PROJECT_DIR/build/examples/bench_server}"
-PORT=18980
+PORT="${PORT:-18980}"
 # 压测端线程数：小核数机器建议与核数相当，避免压测端与被测服务抢 CPU
 WRK_THREADS="${WRK_THREADS:-2}"
 
+# ── 依赖预检：缺工具时明确跳过并给可操作提示，不产出空/0 数据 ──────────
+PREFLIGHT_FAIL=0
+if ! command -v wrk >/dev/null 2>&1; then
+    echo "[跳过] wrk 不可用：本脚本所有 HTTP 基准（A1-A6/B1-B3/C1-C2）全部跳过"
+    echo "       本机 2 vCPU / 2GB 不预装 wrk，安装方式二选一:"
+    echo "         sudo apt install wrk                                   # 仓库版本较旧"
+    echo "         git clone https://github.com/wg/wrk && make -C wrk     # 官方源码编译"
+    PREFLIGHT_FAIL=1
+fi
+if [ ! -x "$BENCH_SERVER" ]; then
+    echo "[跳过] 找不到被测服务 $BENCH_SERVER：全部 HTTP 基准跳过"
+    echo "       修复: cmake -S . -B build -DBUILD_EXAMPLES=ON -DCMAKE_BUILD_TYPE=Release && cmake --build build -j2"
+    PREFLIGHT_FAIL=1
+fi
+if [ "$PREFLIGHT_FAIL" -eq 1 ]; then
+    echo "       本次未产生任何结果文件（退出码 3 = 缺依赖跳过，不是失败）"
+    exit 3
+fi
+
 mkdir -p "$RESULT_DIR"
+# 服务日志目录：日志重定向依赖它存在，目录缺失会让 bench_server 起不来（症状是"服务器已退出"）
+mkdir -p /tmp/hf-test
+
+# 环境探测只做一次（governor 固定尝试缓存到本 shell，供各结果文件头复用）
+bench_env_init
 
 # 清理函数：先 SIGTERM 等待退出，超时再 SIGKILL，避免端口/进程残留影响下一项
 cleanup() {
@@ -61,8 +89,8 @@ record() {
     echo "=== $test_id: $desc ===" | tee "$out"
     echo "分支: $BRANCH" | tee -a "$out"
     echo "时间: $(date -Iseconds)" | tee -a "$out"
-    echo "环境: $(nproc) vCPU / $(awk '/MemTotal/{printf "%.0f", $2/1024}' /proc/meminfo) MB / $(uname -sr)" | tee -a "$out"
-    echo "工具: $(wrk --version 2>&1 | head -1)" | tee -a "$out"
+    # 环境锚定统一走 scripts/bench_env.sh 的公共实现（CPU/gcc/git HEAD/wrk/governor）
+    bench_env_anchor | tee -a "$out"
     echo "说明: 压测端与被测服务同机（环回），服务线程数见各项 --threads，wrk 线程数 -t$WRK_THREADS" | tee -a "$out"
     echo "---" | tee -a "$out"
 }
