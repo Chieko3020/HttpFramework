@@ -75,11 +75,6 @@ std::size_t WebSocketStreamParser::maxPayloadLimit() {
     return cached;
 }
 
-bool WebSocketStreamParser::shouldEnforceNonce() {
-    const char* v = std::getenv("HTTPFW_WSS_ENABLE_0RTT");
-    return v && std::string(v) == "1";
-}
-
 bool WebSocketStreamParser::acceptNonce(const std::string& nonce) {
     static std::mutex mutex;
     static std::unordered_map<std::string, uint64_t> seen;
@@ -249,7 +244,7 @@ bool WebSocketStreamParser::tryConsumeUpgrade(std::string* outAcceptResponse) {
     if (!findHeaderValue(headerBlock, "Upgrade", &upgrade) || toLower(upgrade) != "websocket")
         throw std::runtime_error("Invalid Upgrade header");
 
-    if (shouldEnforceNonce()) {
+    if (enforce_nonce_) {
         std::string nonce;
         if (!findHeaderValue(headerBlock, "X-Nonce", &nonce))
             throw std::runtime_error("Missing X-Nonce in 0-RTT mode");

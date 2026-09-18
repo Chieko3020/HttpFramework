@@ -56,8 +56,15 @@ public:
     bool feed(const uint8_t* data, std::size_t len,
               std::string* outAcceptResponse, std::vector<WsFrame>* outFrames);
 
-    // 服务端是否要求 0-RTT nonce
-    static bool shouldEnforceNonce();
+    // 是否要求升级请求携带 X-Nonce。
+    // 判据只有一个：本次连接是否真的接受了 0-RTT early data
+    // （WssReactor 用 SSL_get_early_data_status() == SSL_EARLY_DATA_ACCEPTED 设置）。
+    // 此前由环境变量 HTTPFW_WSS_ENABLE_0RTT 决定，与 TLS 侧的 0-RTT 开关互相脱耦：
+    // 只设环境变量会在非 0-RTT 连接上拒绝所有正常的升级请求（H9）。
+    void setEnforceNonce(bool enforce) { enforce_nonce_ = enforce; }
+    bool enforceNonce() const { return enforce_nonce_; }
+
+    // nonce 一次性校验（防重放）：同值在 TTL 内只能通过一次
     static bool acceptNonce(const std::string& nonce);
     static std::size_t maxPayloadLimit();
 
@@ -66,6 +73,7 @@ private:
     std::vector<uint8_t> buffer_;
     std::size_t parse_offset_{0};
     bool require_mask_{true};
+    bool enforce_nonce_{false};
     bool in_fragment_{false};
     uint8_t fragment_opcode_{0};
     std::vector<uint8_t> fragment_payload_;

@@ -108,6 +108,14 @@ public:
         return *this;
     }
 
+    // 设置 WSS 的 TLS 参数（0-RTT / 会话票据 / 最小版本等）。
+    // 必须在 start() 之前调用：TLS_CTX 在启动时按该配置创建。
+    App& setWssTlsConfig(const wss::TlsConfig& cfg) {
+        wssTlsConfig_ = cfg;
+        wssTlsConfigSet_ = true;
+        return *this;
+    }
+
     App& ws(const std::string& path, wss::WsHandler handler) {
         if (!wsRouter_) wsRouter_ = std::make_shared<wss::WsRouter>();
         wsRouter_->addHandler(path, std::move(handler));
@@ -172,6 +180,7 @@ public:
         if (wssPort_ > 0) {
             wssReactor_ = std::make_shared<wss::WssReactor>(
                 wssPort_, wssCertFile_, wssKeyFile_, *pool);
+            if (wssTlsConfigSet_) wssReactor_->setTlsConfig(wssTlsConfig_);
             if (wsRouter_) wssReactor_->setWsRouter(wsRouter_);
             if (fileTransfer_) wssReactor_->setFileTransferPlugin(fileTransfer_);
             if (!wssReactor_->start()) {
@@ -227,6 +236,8 @@ private:
     uint16_t wssPort_{0};
     std::string wssCertFile_;
     std::string wssKeyFile_;
+    wss::TlsConfig wssTlsConfig_;
+    bool wssTlsConfigSet_{false};
     std::shared_ptr<wss::WsRouter>    wsRouter_;
     std::shared_ptr<wss::WssReactor>  wssReactor_;
     std::shared_ptr<wss::FileTransferPlugin> fileTransfer_;

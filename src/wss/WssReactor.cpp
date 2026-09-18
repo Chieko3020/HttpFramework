@@ -357,6 +357,11 @@ int driveTlsEarlyRead(WssReactorState* st, std::shared_ptr<WssConnection> c,
         size_t readbytes = 0;
         int ed = SSL_read_early_data(c->state.ssl, buf, static_cast<size_t>(bufLen), &readbytes);
         if (ed == SSL_READ_EARLY_DATA_SUCCESS) {
+            // 0-RTT 复放的唯一判据是"这条连接确实接受了 early data"：
+            // 只有这种情况才要求 X-Nonce（TLS 层的 anti-replay 仍是第一道防线，
+            // 应用层 nonce 负责"同一 nonce 只用一次"的语义）（H9）
+            c->state.ws.setEnforceNonce(
+                SSL_get_early_data_status(c->state.ssl) == SSL_EARLY_DATA_ACCEPTED);
             if (readbytes > 0) {
                 bool stop = false;
                 if (!processWsInboundBuffer(st, c->state.fd, c, pool, router, wake_fd,
