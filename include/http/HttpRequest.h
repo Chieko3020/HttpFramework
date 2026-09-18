@@ -38,6 +38,7 @@ public:
     
     // 获取头部
     const std::string& getHeader(const std::string& name) const;
+    bool hasHeader(const std::string& name) const;
     const std::unordered_map<std::string, std::string>& getHeaders() const { return headers_; }
     
     // 获取查询参数
@@ -62,11 +63,21 @@ public:
     
     // 获取Content-Length
     size_t getContentLength() const;
+    // Content-Length 头是否语法合法（缺省视为合法=0）。
+    // 畸形值（非纯数字 / 溢出）必须被显式拒绝，否则会被当作 0 处理，
+    // 让该请求的 body 被解析成"下一个请求"，构成请求走私面。
+    bool isContentLengthValid() const { return contentLengthValid_; }
     
     // 获取头部结束位置（用于计算已消费数据量，解决粘包问题）
     size_t getHeaderEnd() const { return headerEnd_; }
     size_t getHeaderEndSepLen() const { return headerEndSepLen_; }
-    size_t getRawBodySize() const { return rawBodySize_; }  // chunked 解码前原始 body 大小
+    // chunked 解码前原始 body 大小（仅 chunked 有意义，供诊断/统计）
+    size_t getRawBodySize() const { return rawBodySize_; }
+    // 本次请求的 body 在原始缓冲区中占用的字节数：
+    //   非 chunked：Content-Length（无该头时为 0）
+    //   chunked  ：整个 chunked 报文（含长度行与终止块）的字节数
+    // 调用方据此推进解析偏移，实现管线化 / 粘包的正确切分。
+    size_t getBodyConsumed() const { return bodyConsumed_; }
     
     // 获取Content-Type
     std::string getContentType() const;
@@ -90,6 +101,9 @@ private:
     size_t headerEnd_ = 0;
     size_t headerEndSepLen_ = 0;  // 分隔符长度：\r\n\r\n=4, \n\n=2
     size_t rawBodySize_ = 0;      // chunked 解码前原始 body 大小
+    size_t bodyConsumed_ = 0;     // 本次请求在原始缓冲区中占用 body 的字节数
+    size_t contentLength_ = 0;    // 解析后的 Content-Length
+    bool contentLengthValid_ = true;  // Content-Length 语法是否合法
     
     // 解析请求行
     bool parseRequestLine(const std::string& line);

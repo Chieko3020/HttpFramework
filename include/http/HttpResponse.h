@@ -79,6 +79,11 @@ public:
     bool isSent() const { return sent_; }
     void setSent(bool sent) { sent_ = sent; }
 
+    // 响应已终结：内容已由框架自身决定（例如请求体超限的 413），
+    // 不允许路由器 / 业务 handler 再覆盖它（否则 413 会被路由改成 404）。
+    bool isFinalized() const { return sent_; }
+    void markFinalized() { sent_ = true; }
+
 private:
     int statusCode_;
     std::string reasonPhrase_;

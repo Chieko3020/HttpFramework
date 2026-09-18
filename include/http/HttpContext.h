@@ -55,8 +55,10 @@ public:
     void consumeData(size_t n);  // 只消费前 n 字节，保留剩余数据
 
     // 响应数据管理 - 支持内存池和传统方式
-    void setResponseData(const std::string& data);
-    void setResponseData(const char* data, size_t len);
+    // 返回值：true = 响应完整落入缓冲区；false = 内存池单块装不下，已自动回退到
+    // std::string 路径（内容仍然完整，只是内存来源不同）。绝不静默截断。
+    bool setResponseData(const std::string& data);
+    bool setResponseData(const char* data, size_t len);
     std::string getResponseData() const;
     
     // 内存池管理
@@ -70,10 +72,13 @@ public:
     void resetWriteOffset() { writeOffset_ = 0; }
     size_t getWriteOffset() const { return writeOffset_; }
     void setWriteOffset(size_t offset) { writeOffset_ = offset; }
-    bool hasMoreDataToWrite() const;
     
-    // 截断检测（内存池缓冲区满时）
+    // 缓冲区截断检测（内存池单块容量不足时置位）
     bool isTruncated() const { return truncated_; }
+
+    // 连接代际（见 utils/SocketCompat.h）：同一 fd 号被复用时用于区分新旧连接
+    void setConnectionGeneration(uint32_t generation) { connectionGeneration_ = generation; }
+    uint32_t connectionGeneration() const { return connectionGeneration_; }
 
 private:
     HttpRequest request_;
@@ -97,6 +102,9 @@ private:
     // 写入进度跟踪
     size_t writeOffset_;
     bool truncated_ = false;
+
+    // 连接代际（同一 fd 号复用后的归属校验）
+    uint32_t connectionGeneration_ = 0;
 
     // 最近一次 I/O 活跃时间（空闲超时清理用）
     std::chrono::steady_clock::time_point lastActive_{std::chrono::steady_clock::now()};

@@ -2,6 +2,7 @@
 #include "router/Router.h"
 #include "router/RouterHandler.h"
 
+#include <algorithm>
 #include <iostream>
 #include <cstring>
 #include <errno.h>
@@ -11,9 +12,19 @@
 
 namespace http {
 
+namespace {
+// 子 Reactor 的事件掩码：边沿触发 + oneshot（每次事件后需显式重新武装）
+constexpr uint32_t kConnReadEvents = EPOLLIN | EPOLLET | EPOLLONESHOT;
+constexpr uint32_t kConnWriteEvents = EPOLLOUT | EPOLLET | EPOLLONESHOT;
+}  // namespace
+
 HttpServer::HttpServer(int port, size_t threadPoolSize, size_t subReactorCount)
     : port_(port), running_(false), listenFd_(-1), mainEpollFd_(-1),
       threadPoolSize_(threadPoolSize), useMemoryPool_(false) {
+
+    // 进程早期兜底：忽略 SIGPIPE，所有 socket 写入走 MSG_NOSIGNAL。
+    // 对端 RST 后 write() 会投递 SIGPIPE，默认动作是终止进程。
+    net::ensureSigpipeIgnored();
 
     if (subReactorCount == 0)
         subReactorCount = std::thread::hardware_concurrency();
@@ -31,6 +42,8 @@ HttpServer::HttpServer(int port, size_t threadPoolSize, size_t subReactorCount)
 
 HttpServer::HttpServer(int port, utils::ThreadPool& threadPool, size_t subReactorCount)
     : port_(port), running_(false), listenFd_(-1), mainEpollFd_(-1), useMemoryPool_(false) {
+
+    net::ensureSigpipeIgnored();
 
     if (subReactorCount == 0)
         subReactorCount = std::thread::hardware_concurrency();
@@ -149,10 +162,10 @@ void HttpServer::stop() {
         sr->contexts.clear();
     }
 
-    // 清理 fd→reactor 映射
+    // 清理连接归属表
     {
-        std::lock_guard<std::mutex> lock(fdToReactorMutex_);
-        fdToReactor_.clear();
+        std::lock_guard<std::mutex> lock(connMutex_);
+        conns_.clear();
     }
 
     std::cout << "[INFO][HTTP服务器]：服务已停止" << std::endl;
@@ -233,11 +246,12 @@ bool HttpServer::setupMainEpoll() {
 
     struct epoll_event event;
     event.events = EPOLLIN | EPOLLET;
-    event.data.fd = listenFd_;
+    event.data.u64 = net::makeConnId(listenFd_, 0);
 
     if (epoll_ctl(mainEpollFd_, EPOLL_CTL_ADD, listenFd_, &event) < 0) {
         std::cerr << "[ERROR][HTTP服务器]：添加监听socket到主epoll失败: " << strerror(errno) << std::endl;
         close(mainEpollFd_);
+        mainEpollFd_ = -1;
         return false;
     }
 
@@ -265,7 +279,7 @@ bool HttpServer::setupSubReactor(size_t index) {
 
     struct epoll_event ev;
     ev.events = EPOLLIN | EPOLLET;
-    ev.data.fd = sr->wakeFd;
+    ev.data.u64 = net::makeConnId(sr->wakeFd, 0);
     if (epoll_ctl(sr->epollFd, EPOLL_CTL_ADD, sr->wakeFd, &ev) < 0) {
         std::cerr << "[ERROR][HTTP服务器]：注册 eventfd 到 epoll 失败, index=" << index
                   << ": " << strerror(errno) << std::endl;
@@ -304,7 +318,7 @@ bool HttpServer::setupSubReactor(size_t index) {
     }
 
     ev.events = EPOLLIN;   // 非 ET：每次唤醒都读取到期计数即可
-    ev.data.fd = sr->timerFd;
+    ev.data.u64 = net::makeConnId(sr->timerFd, 0);
     if (epoll_ctl(sr->epollFd, EPOLL_CTL_ADD, sr->timerFd, &ev) < 0) {
         std::cerr << "[ERROR][HTTP服务器]：注册 timerfd 到 epoll 失败, index=" << index
                   << ": " << strerror(errno) << std::endl;
@@ -316,6 +330,11 @@ bool HttpServer::setupSubReactor(size_t index) {
         sr->epollFd = -1;
         return false;
     }
+
+    // 登记归属（代际 0）：避免这些 fd 被误判为"可被陈旧回调关闭的连接 fd"
+    registerEventFd(sr->epollFd, static_cast<int>(index));
+    registerEventFd(sr->wakeFd, static_cast<int>(index));
+    registerEventFd(sr->timerFd, static_cast<int>(index));
 
     return true;
 }
@@ -333,6 +352,85 @@ void HttpServer::setRouter(std::shared_ptr<router::Router> router) {
 void HttpServer::enableMemoryPool(bool enable) {
     useMemoryPool_ = enable;
     std::cout << "[INFO][HTTP服务器]：内存池已" << (enable ? "启用" : "禁用") << std::endl;
+}
+
+// ---- 连接归属与代际校验 ----
+
+net::ConnId HttpServer::registerConnection(int fd, int subReactorIndex) {
+    uint32_t gen = net::nextConnectionGeneration();
+    std::lock_guard<std::mutex> lock(connMutex_);
+    auto& binding = conns_[fd];
+    binding.generation = gen;
+    binding.owner = subReactorIndex;
+    binding.context = true;
+    return net::makeConnId(fd, gen);
+}
+
+void HttpServer::registerEventFd(int fd, int subReactorIndex) {
+    std::lock_guard<std::mutex> lock(connMutex_);
+    auto& binding = conns_[fd];
+    binding.owner = subReactorIndex;
+    binding.context = false;
+    // 代际 0：与任何真实连接代际都不相等，事件校验统一按 fd 处理
+}
+
+void HttpServer::unregisterEventFd(int fd) {
+    std::lock_guard<std::mutex> lock(connMutex_);
+    conns_.erase(fd);
+}
+
+bool HttpServer::ownsConnection(int fd, int subReactorIndex, net::ConnId connId) const {
+    std::lock_guard<std::mutex> lock(connMutex_);
+    auto it = conns_.find(fd);
+    if (it == conns_.end()) {
+        return false;
+    }
+    if (!it->second.context || it->second.owner != subReactorIndex) {
+        return false;
+    }
+    return it->second.generation != 0 &&
+           it->second.generation == net::connIdGeneration(connId);
+}
+
+bool HttpServer::fdTakenByOther(int fd, int subReactorIndex) const {
+    std::lock_guard<std::mutex> lock(connMutex_);
+    auto it = conns_.find(fd);
+    if (it == conns_.end()) {
+        return false;
+    }
+    return it->second.owner >= 0 && it->second.owner != subReactorIndex;
+}
+
+void HttpServer::dropPendingWrites(int subReactorIndex, int fd) {
+    auto& sr = subReactors_[subReactorIndex];
+    std::lock_guard<std::mutex> lock(sr->wakeMutex);
+    sr->pendingWrites.erase(
+        std::remove_if(sr->pendingWrites.begin(), sr->pendingWrites.end(),
+                       [fd](net::ConnId id) { return net::connIdFd(id) == fd; }),
+        sr->pendingWrites.end());
+}
+
+void HttpServer::notifyConnectionReady(int subReactorIndex, net::ConnId connId) {
+    auto& sr = subReactors_[subReactorIndex];
+    {
+        std::lock_guard<std::mutex> lock(sr->wakeMutex);
+        sr->pendingWrites.push_back(connId);
+    }
+    uint64_t one = 1;
+    // eventfd：用 MSG_NOSIGNAL 不适用（非 socket），但已全局忽略 SIGPIPE；
+    // 且 eventfd 写失败只可能是关闭/EFD 计数溢出，不影响正确性。
+    ssize_t n = ::write(sr->wakeFd, &one, sizeof(one));
+    (void)n;
+}
+
+net::ConnId HttpServer::connIdOf(int subReactorIndex, int fd) const {
+    auto& sr = subReactors_[subReactorIndex];
+    std::lock_guard<std::mutex> lock(sr->contextsMutex);
+    auto it = sr->contexts.find(fd);
+    if (it == sr->contexts.end()) {
+        return 0;
+    }
+    return net::makeConnId(fd, it->second->connectionGeneration());
 }
 
 // ---- 主 Reactor（仅 accept + 分发） ----
@@ -353,7 +451,8 @@ void HttpServer::mainReactorLoop() {
         }
 
         for (int i = 0; i < nfds; ++i) {
-            if (events[i].data.fd == listenFd_ && (events[i].events & EPOLLIN)) {
+            int fd = net::connIdFd(events[i].data.u64);
+            if (fd == listenFd_ && (events[i].events & EPOLLIN)) {
                 handleAccept();
             }
         }
@@ -367,6 +466,7 @@ void HttpServer::handleAccept() {
     socklen_t clientAddrLen = sizeof(clientAddr);
 
     while (true) {
+        clientAddrLen = sizeof(clientAddr);
         int clientFd = accept(listenFd_, (struct sockaddr*)&clientAddr, &clientAddrLen);
         if (clientFd < 0) {
             if (errno == EAGAIN || errno == EWOULDBLOCK) break;
@@ -385,31 +485,40 @@ void HttpServer::handleAccept() {
         int idx = static_cast<int>(nextSubReactor_.fetch_add(1) % subReactorCount_);
         auto& sr = subReactors_[idx];
 
-        // 添加到子 Reactor 的 epoll
+        // fd 号可能刚从本 reactor 上一个连接回收：清掉该 fd 的陈旧待发送项，
+        // 否则旧任务的完成回调会写进这个新连接（C2 的另一半）。
+        dropPendingWrites(idx, clientFd);
+
+        // 先建立连接上下文与归属记录，再注册到 epoll。
+        // 反过来的话，epoll_ctl(ADD) 会在 fd 已可读时立刻回调，
+        // handleRead 发现 contexts 里还没有该 fd 就会把连接关掉（C6）。
+        net::ConnId connId = registerConnection(clientFd, idx);
+
+        {
+            std::lock_guard<std::mutex> lock(sr->contextsMutex);
+            auto ctx = std::make_unique<HttpContext>();
+            ctx->setConnectionGeneration(net::connIdGeneration(connId));
+            if (useMemoryPool_) {
+                ctx->enableMemoryPool(true);
+            }
+            sr->contexts[clientFd] = std::move(ctx);
+        }
+
         struct epoll_event event;
-        event.events = EPOLLIN | EPOLLET | EPOLLONESHOT;
-        event.data.fd = clientFd;
+        event.events = kConnReadEvents;
+        event.data.u64 = connId;
 
         if (epoll_ctl(sr->epollFd, EPOLL_CTL_ADD, clientFd, &event) < 0) {
             std::cerr << "[ERROR][HTTP服务器]：添加客户端到子Reactor失败, idx=" << idx
                       << " epoll: " << strerror(errno) << std::endl;
+            // 回滚已插入的上下文与归属记录
+            {
+                std::lock_guard<std::mutex> lock(sr->contextsMutex);
+                sr->contexts.erase(clientFd);
+            }
+            unregisterEventFd(clientFd);
             close(clientFd);
             continue;
-        }
-
-        // 创建上下文
-        {
-            std::lock_guard<std::mutex> lock(sr->contextsMutex);
-            sr->contexts[clientFd] = std::make_unique<HttpContext>();
-            if (useMemoryPool_) {
-                sr->contexts[clientFd]->enableMemoryPool(true);
-            }
-        }
-
-        // 记录 fd→reactor 映射
-        {
-            std::lock_guard<std::mutex> lock(fdToReactorMutex_);
-            fdToReactor_[clientFd] = idx;
         }
 
         stats_.activeConnections.fetch_add(1);
@@ -440,7 +549,8 @@ void HttpServer::subReactorLoop(int index) {
         }
 
         for (int i = 0; i < nfds; ++i) {
-            int fd = events[i].data.fd;
+            net::ConnId connId = events[i].data.u64;
+            int fd = net::connIdFd(connId);
             uint32_t ev = events[i].events;
 
             // eventfd 唤醒：批量处理待发送的响应
@@ -455,10 +565,16 @@ void HttpServer::subReactorLoop(int index) {
                 continue;
             }
 
+            // 代际校验：fd 号被回收再分配后，内核可能仍投递一次属于旧连接的
+            // 事件；代际不符时直接丢弃，绝不按"未知连接"去关闭它。
+            if (index < 0 || !ownsConnection(fd, index, connId)) {
+                continue;
+            }
+
             if (ev & (EPOLLERR | EPOLLHUP)) {
                 closeConnection(fd, index);
             } else {
-                if (ev & EPOLLIN)  handleRead(fd, index);
+                if (ev & EPOLLIN)  handleRead(fd, index, connId);
                 if (ev & EPOLLOUT) handleWrite(fd, index);
             }
         }
@@ -467,15 +583,17 @@ void HttpServer::subReactorLoop(int index) {
     std::cout << "[DEBUG][HTTP服务器]：子Reactor" << index << " 循环结束" << std::endl;
 }
 
-void HttpServer::handleRead(int clientFd, int subReactorIndex) {
-    std::string data = readAllData(clientFd);
-
-    if (data.empty()) {
-        closeConnection(clientFd, subReactorIndex);
-        return;
-    }
-
+void HttpServer::rearmRead(int clientFd, int subReactorIndex, net::ConnId connId) {
     auto& sr = subReactors_[subReactorIndex];
+    struct epoll_event event;
+    event.events = kConnReadEvents;
+    event.data.u64 = connId;
+    epoll_ctl(sr->epollFd, EPOLL_CTL_MOD, clientFd, &event);
+}
+
+void HttpServer::handleRead(int clientFd, int subReactorIndex, net::ConnId connId) {
+    auto& sr = subReactors_[subReactorIndex];
+
     HttpContext* ctxPtr = nullptr;
     {
         std::lock_guard<std::mutex> lock(sr->contextsMutex);
@@ -486,7 +604,25 @@ void HttpServer::handleRead(int clientFd, int subReactorIndex) {
     }
 
     if (!ctxPtr) {
+        // 上下文缺失在正常路径不可达（handleAccept 已先建上下文再注册 epoll）。
+        // 这里既不知道连接状态，也不该关掉一个可能已被复用的 fd 号。
         closeConnection(clientFd, subReactorIndex);
+        return;
+    }
+
+    size_t totalRead = 0;
+    std::string data = readAllData(clientFd, &totalRead);
+
+    if (totalRead == 0) {
+        // 未读到任何字节：对端已关闭（EOF）或事件已被取走（EAGAIN）。
+        // 用 recv 的返回语义区分，避免把"暂无数据"误判为连接终止。
+        char probe = 0;
+        ssize_t n = ::recv(clientFd, &probe, 1, 0);
+        if (n == 0) {
+            closeConnection(clientFd, subReactorIndex);
+        } else {
+            rearmRead(clientFd, subReactorIndex, connId);
+        }
         return;
     }
 
@@ -501,24 +637,19 @@ void HttpServer::handleRead(int clientFd, int subReactorIndex) {
         response->setBody("{\"error\":\"Payload too large\"}");
         response->setHeader("Content-Type", "application/json");
         response->setHeader("Connection", "close");  // 请求被截断，不复用连接
-        auto task = std::make_shared<HttpRequestTask>(
-            clientFd, std::make_shared<HttpRequest>(), response,
-            [this, subReactorIndex](int fd, std::shared_ptr<HttpRequest> req,
-                                     std::shared_ptr<HttpResponse> res) {
-                processHttpRequest(subReactorIndex, fd, req, res);
-            }
-        );
-        threadPool_->enqueue([task]() {
-            task->execute();
-        });
+        // 标记"响应已终结"，阻止路由覆盖该响应（H1）
+        response->markFinalized();
+        enqueueRequestTask(subReactorIndex, clientFd, connId,
+                           std::make_shared<HttpRequest>(), response);
         return;
     }
 
-    dispatchBufferedRequests(clientFd, subReactorIndex);
+    dispatchBufferedRequests(clientFd, subReactorIndex, connId);
 }
 
 // 解析并提交缓冲区中的完整请求（长连接下响应发完后会再次调用）
-void HttpServer::dispatchBufferedRequests(int clientFd, int subReactorIndex) {
+void HttpServer::dispatchBufferedRequests(int clientFd, int subReactorIndex,
+                                          net::ConnId connId) {
     auto& sr = subReactors_[subReactorIndex];
     HttpContext* ctxPtr = nullptr;
     {
@@ -537,46 +668,63 @@ void HttpServer::dispatchBufferedRequests(int clientFd, int subReactorIndex) {
     if (!ctxPtr->getResponseData().empty()) return;
 
     auto request = std::make_shared<HttpRequest>();
-    if (!request->parse(ctxPtr->getData())) {
+    const std::string buffered = ctxPtr->getData();
+    if (!request->parse(buffered)) {
+        if (!request->isContentLengthValid()) {
+            // 畸形 Content-Length 必须显式拒绝：按 0 处理会让 body 被当成下一个
+            // 请求解析，是请求走私面。此连接状态已不可信，响应后关闭。
+            auto response = std::make_shared<HttpResponse>();
+            response->setStatus(HttpStatus::BAD_REQUEST);
+            response->setJson(R"({"error":"Invalid Content-Length"})");
+            response->setHeader("Connection", "close");
+            response->markFinalized();
+            enqueueRequestTask(subReactorIndex, clientFd, connId,
+                               request, response);
+            return;
+        }
         // 请求不完整：重新注册 EPOLLIN（EPOLLONESHOT 需要显式重置）
-        struct epoll_event event;
-        event.events = EPOLLIN | EPOLLET | EPOLLONESHOT;
-        event.data.fd = clientFd;
-        epoll_ctl(sr->epollFd, EPOLL_CTL_MOD, clientFd, &event);
+        rearmRead(clientFd, subReactorIndex, connId);
         return;
     }
 
-    // 只消费已解析的请求数据，保留缓冲区中可能的下一个请求（粘包 / pipelining）
-    size_t consumed = request->getHeaderEnd() + request->getHeaderEndSepLen();
-    size_t contentLength = request->getContentLength();
-    consumed += (contentLength > 0) ? contentLength : request->getRawBodySize();
-
-    if (consumed == 0) {
-        // 防御：解析结果未能定位头部结束位置时按"请求不完整"处理，避免反复响应同一段数据
-        struct epoll_event event;
-        event.events = EPOLLIN | EPOLLET | EPOLLONESHOT;
-        event.data.fd = clientFd;
-        epoll_ctl(sr->epollFd, EPOLL_CTL_MOD, clientFd, &event);
+    // 只消费"本次请求自身"占用的字节：头部结束符 + 严格按 Content-Length
+    // （或 chunked 报文实际长度）切分的 body。不能用"头部之后整段缓冲区"的长度，
+    // 否则同一连接上管线化的后续请求会被一并吞掉（C3），body 也会带上后续请求（C5）。
+    const size_t available = buffered.size();
+    size_t consumed = request->getHeaderEnd() + request->getHeaderEndSepLen() +
+                      request->getBodyConsumed();
+    if (consumed == 0 || consumed > available) {
+        // 防御：越界消费会让解析器读空缓冲区或反复响应同一段数据
+        rearmRead(clientFd, subReactorIndex, connId);
         return;
     }
 
     ctxPtr->consumeData(consumed);
 
     auto response = std::make_shared<HttpResponse>();
+    enqueueRequestTask(subReactorIndex, clientFd, connId, request, response);
+}
+
+void HttpServer::enqueueRequestTask(int subReactorIndex, int clientFd, net::ConnId connId,
+                                    std::shared_ptr<HttpRequest> request,
+                                    std::shared_ptr<HttpResponse> response) {
+    // 两条入队路径（正常解析 / 请求体截断）共用同一处记账，
+    // 保证 totalRequests 与 queuedTasks 严格成对（H2）
+    stats_.totalRequests.fetch_add(1);
+    stats_.queuedTasks.fetch_add(1);
+
     auto task = std::make_shared<HttpRequestTask>(
         clientFd, request, response,
-        [this, subReactorIndex](int fd, std::shared_ptr<HttpRequest> req,
-                                 std::shared_ptr<HttpResponse> res) {
-            processHttpRequest(subReactorIndex, fd, req, res);
+        [this, subReactorIndex, connId](int fd, std::shared_ptr<HttpRequest> req,
+                                        std::shared_ptr<HttpResponse> res) {
+            (void)fd;
+            processHttpRequest(subReactorIndex, connId, req, res);
         }
     );
 
     threadPool_->enqueue([task]() {
         task->execute();
     });
-
-    stats_.totalRequests.fetch_add(1);
-    stats_.queuedTasks.fetch_add(1);
 }
 
 void HttpServer::handleTimer(int subReactorIndex) {
@@ -590,21 +738,23 @@ void HttpServer::handleTimer(int subReactorIndex) {
     if (idleTimeoutSec_ <= 0) return;
 
     const auto now = std::chrono::steady_clock::now();
-    std::vector<int> idleFds;
+    std::vector<net::ConnId> idleConns;
     {
         std::lock_guard<std::mutex> lock(sr->contextsMutex);
         for (auto& [fd, ctx] : sr->contexts) {
             auto idle = std::chrono::duration_cast<std::chrono::seconds>(
                             now - ctx->lastActive())
                             .count();
-            if (idle >= idleTimeoutSec_) idleFds.push_back(fd);
+            if (idle >= idleTimeoutSec_) {
+                idleConns.push_back(net::makeConnId(fd, ctx->connectionGeneration()));
+            }
         }
     }
 
-    for (int fd : idleFds) {
-        std::cout << "[INFO][HTTP服务器]：空闲超时关闭连接, fd=" << fd
+    for (net::ConnId id : idleConns) {
+        std::cout << "[INFO][HTTP服务器]：空闲超时关闭连接, fd=" << net::connIdFd(id)
                   << ", idle>=" << idleTimeoutSec_ << "s" << std::endl;
-        closeConnection(fd, subReactorIndex);
+        closeConnectionId(id);
     }
 }
 
@@ -613,18 +763,19 @@ void HttpServer::handleWake(int subReactorIndex) {
 
     // 消费 eventfd 的写入（防止电平触发重复唤醒）
     uint64_t val;
-    read(sr->wakeFd, &val, sizeof(val));
+    ssize_t n = read(sr->wakeFd, &val, sizeof(val));
+    (void)n;
 
-    // 拉取待发送的 fd 列表
-    std::vector<int> fds;
+    // 拉取待发送的连接列表
+    std::vector<net::ConnId> conns;
     {
         std::lock_guard<std::mutex> lock(sr->wakeMutex);
-        fds.swap(sr->pendingWrites);
+        conns.swap(sr->pendingWrites);
     }
 
     // 在当前 sub reactor 线程执行 send
-    for (int fd : fds) {
-        handleWrite(fd, subReactorIndex);
+    for (net::ConnId id : conns) {
+        handleWrite(net::connIdFd(id), subReactorIndex);
     }
 }
 
@@ -640,12 +791,24 @@ void HttpServer::handleWrite(int clientFd, int subReactorIndex) {
     }
 
     if (!ctxPtr) {
+        // 该 fd 已无上下文：可能是连接已被关闭（含 fd 被新连接复用）。
+        // closeConnection 内部会做归属校验，不会动已被别的连接占用的 fd（C2）。
         closeConnection(clientFd, subReactorIndex);
         return;
     }
 
     std::string responseData = ctxPtr->getResponseData();
-    if (!responseData.empty()) {
+    if (responseData.empty()) {
+        // 唤醒到达但响应区还是空的：worker 尚未把响应落盘。
+        // 此时绝不能就这么返回——该连接在这次唤醒前刚被 EPOLL_CTL_MOD 消费掉
+        // oneshot 状态，不重新武装就再也收不到事件（响应会永久丢失）。
+        // 这里补一次 EPOLLIN，让唤醒路径自我纠错。
+        rearmRead(clientFd, subReactorIndex,
+                  net::makeConnId(clientFd, ctxPtr->connectionGeneration()));
+        return;
+    }
+
+    {
         size_t offset = ctxPtr->getWriteOffset();
         size_t bytesWritten = 0;
 
@@ -656,29 +819,70 @@ void HttpServer::handleWrite(int clientFd, int subReactorIndex) {
                 // 长连接：保留连接，重置上下文后继续接收同一连接的下一个请求
                 ctxPtr->resetForNextRequest();
                 ctxPtr->touch();
-                struct epoll_event event;
-                event.events = EPOLLIN | EPOLLET | EPOLLONESHOT;
-                event.data.fd = clientFd;
-                epoll_ctl(sr->epollFd, EPOLL_CTL_MOD, clientFd, &event);
+                rearmRead(clientFd, subReactorIndex,
+                          net::makeConnId(clientFd, ctxPtr->connectionGeneration()));
                 // 缓冲区中可能已缓存下一个请求（粘包 / pipelining），立即处理
                 if (!ctxPtr->getData().empty()) {
-                    dispatchBufferedRequests(clientFd, subReactorIndex);
+                    dispatchBufferedRequests(
+                        clientFd, subReactorIndex,
+                        net::makeConnId(clientFd, ctxPtr->connectionGeneration()));
                 }
             } else {
                 closeConnection(clientFd, subReactorIndex);
             }
         } else {
             ctxPtr->setWriteOffset(offset + bytesWritten);
+            if (bytesWritten == 0) {
+                // 一个字节都没写出去且不是 EAGAIN：对端已不可用（EPIPE/ECONNRESET）。
+                // 继续重新武装 EPOLLOUT 只会空转，直接关闭。
+                if (!(errno == EAGAIN || errno == EWOULDBLOCK)) {
+                    closeConnection(clientFd, subReactorIndex);
+                    return;
+                }
+            }
             // 部分写，重新注册 EPOLLOUT（仍在 sub reactor 线程，无跨线程问题）
             struct epoll_event event;
-            event.events = EPOLLOUT | EPOLLET | EPOLLONESHOT;
-            event.data.fd = clientFd;
+            event.events = kConnWriteEvents;
+            event.data.u64 = net::makeConnId(clientFd, ctxPtr->connectionGeneration());
             epoll_ctl(sr->epollFd, EPOLL_CTL_MOD, clientFd, &event);
         }
     }
 }
 
 void HttpServer::closeConnection(int fd, int subReactorIndex) {
+    closeConnectionId(connIdOf(subReactorIndex, fd));
+    // connIdOf 在上下文已不存在时返回 0：此时 fd 上已无本 reactor 的连接，
+    // 不做任何关闭动作（这正是 C2 的约束：不关闭"不属于自己"的 fd）。
+}
+
+void HttpServer::closeConnectionId(net::ConnId connId) {
+    if (connId == 0) return;
+
+    int fd = net::connIdFd(connId);
+    int subReactorIndex = -1;
+
+    {
+        std::lock_guard<std::mutex> lock(connMutex_);
+        auto it = conns_.find(fd);
+        if (it == conns_.end() || !it->second.context) {
+            // 从未见过的 fd：绝不动它（可能是别的模块/别的对象的 fd）
+            return;
+        }
+        if (it->second.generation != net::connIdGeneration(connId)) {
+            // 陈旧回调：该 fd 号已被新连接占用，或已归还给其它所有者 —— 不关
+            return;
+        }
+        subReactorIndex = it->second.owner;
+        // 先注销归属（保留代际号），使重复回调无法二次关闭同一个 fd
+        it->second.owner = -1;
+        it->second.context = false;
+    }
+
+    if (subReactorIndex < 0 || subReactorIndex >= static_cast<int>(subReactors_.size())) {
+        // 该 fd 不属于任何一个本服务器管理的连接：不动它
+        return;
+    }
+
     auto& sr = subReactors_[subReactorIndex];
 
     epoll_ctl(sr->epollFd, EPOLL_CTL_DEL, fd, nullptr);
@@ -688,10 +892,8 @@ void HttpServer::closeConnection(int fd, int subReactorIndex) {
         sr->contexts.erase(fd);
     }
 
-    {
-        std::lock_guard<std::mutex> lock(fdToReactorMutex_);
-        fdToReactor_.erase(fd);
-    }
+    // 该 fd 上不再有在途响应
+    dropPendingWrites(subReactorIndex, fd);
 
     close(fd);
 
@@ -703,23 +905,32 @@ void HttpServer::closeConnection(int fd, int subReactorIndex) {
 
 // ---- 业务处理（线程池中执行） ----
 
-void HttpServer::processHttpRequest(int subReactorIndex, int clientFd,
+void HttpServer::processHttpRequest(int subReactorIndex, net::ConnId connId,
                                     std::shared_ptr<HttpRequest> request,
                                     std::shared_ptr<HttpResponse> response) {
-    try {
-        if (router_) {
-            router_->handleRequest(*request, *response);
-        } else {
-            response->setStatus(HttpStatus::NOT_FOUND);
-            response->setJson(R"({"error": "No router configured"})");
-        }
+    int clientFd = net::connIdFd(connId);
 
-        // 按请求的连接复用意愿回写 Connection 头，并把意愿记入上下文供 I/O 线程决策
-        const bool keepAlive = request->isKeepAlive();
-        response->setHeader("Connection", keepAlive ? "keep-alive" : "close");
+    try {
+        if (!response->isFinalized()) {
+            if (router_) {
+                router_->handleRequest(*request, *response);
+            } else {
+                response->setStatus(HttpStatus::NOT_FOUND);
+                response->setJson(R"({"error": "No router configured"})");
+            }
+
+            // 按请求的连接复用意愿回写 Connection 头，并把意愿记入上下文供 I/O 线程决策
+            const bool keepAlive = request->isKeepAlive();
+            response->setHeader("Connection", keepAlive ? "keep-alive" : "close");
+        } else {
+            // 请求体被截断等"响应已终结"的路径：保持既有语义（关闭连接）
+            response->setHeader("Connection", "close");
+        }
 
         std::string responseData = response->toString();
         auto& sr = subReactors_[subReactorIndex];
+
+        bool keepAlive = !response->isFinalized() && request->isKeepAlive();
 
         {
             std::lock_guard<std::mutex> lock(sr->contextsMutex);
@@ -730,13 +941,11 @@ void HttpServer::processHttpRequest(int subReactorIndex, int clientFd,
             }
         }
 
-        // 通过 eventfd 唤醒 sub reactor 线程执行 send，避免跨线程 epoll_ctl 竞态
-        {
-            std::lock_guard<std::mutex> lock(sr->wakeMutex);
-            sr->pendingWrites.push_back(clientFd);
-        }
-        uint64_t one = 1;
-        write(sr->wakeFd, &one, sizeof(one));
+        // 顺序要紧：必须先落盘响应、再唤醒 I/O 线程。
+        // 反过来的话，I/O 线程可能在"事件计数已被消费、响应区仍为空"的窗口里
+        // 处理这连接（handleWrite 对空响应直接返回且不会重新武装 EPOLLIN），
+        // 这条连接就再也等不到下一次唤醒 —— 表现为管线化里某一环的响应永久丢失。
+        notifyConnectionReady(subReactorIndex, connId);
 
         stats_.completedRequests.fetch_add(1);
         stats_.queuedTasks.fetch_sub(1);
@@ -760,28 +969,26 @@ void HttpServer::processHttpRequest(int subReactorIndex, int clientFd,
             }
         }
 
-        // 通过 eventfd 唤醒 sub reactor 线程执行 send
-        {
-            std::lock_guard<std::mutex> lock(sr->wakeMutex);
-            sr->pendingWrites.push_back(clientFd);
-        }
-        uint64_t one = 1;
-        write(sr->wakeFd, &one, sizeof(one));
+        // 同上：先落盘响应再唤醒
+        notifyConnectionReady(subReactorIndex, connId);
 
+        stats_.completedRequests.fetch_add(1);
         stats_.queuedTasks.fetch_sub(1);
     }
 }
 
 // ---- I/O 辅助 ----
 
-std::string HttpServer::readAllData(int fd) {
+std::string HttpServer::readAllData(int fd, size_t* totalRead) {
     std::string data;
     char buffer[4096];
+    size_t readBytes = 0;
 
     while (true) {
         ssize_t n = read(fd, buffer, sizeof(buffer));
         if (n > 0) {
-            data.append(buffer, n);
+            data.append(buffer, static_cast<size_t>(n));
+            readBytes += static_cast<size_t>(n);
         } else if (n == 0) {
             break;
         } else {
@@ -792,11 +999,8 @@ std::string HttpServer::readAllData(int fd) {
         }
     }
 
+    if (totalRead) *totalRead = readBytes;
     return data;
-}
-
-bool HttpServer::writeAllData(int fd, const std::string& data) {
-    return writeAllDataFromOffset(fd, data, 0);
 }
 
 bool HttpServer::writeAllDataFromOffset(int fd, const std::string& data,
@@ -811,9 +1015,10 @@ bool HttpServer::writeAllDataFromOffset(int fd, const std::string& data,
     size_t dataSize = data.size();
 
     while (totalWritten < dataSize) {
-        ssize_t n = write(fd, buffer + totalWritten, dataSize - totalWritten);
+        // MSG_NOSIGNAL：对端 RST 后返回 EPIPE 而不是投递 SIGPIPE 杀死进程（C1）
+        ssize_t n = net::sendNoSignal(fd, buffer + totalWritten, dataSize - totalWritten);
         if (n > 0) {
-            totalWritten += n;
+            totalWritten += static_cast<size_t>(n);
         } else if (n == 0) {
             if (bytesWritten) *bytesWritten = totalWritten - offset;
             return false;

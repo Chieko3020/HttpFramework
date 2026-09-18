@@ -37,13 +37,13 @@ void HttpContext::clear() {
         if (responseBuffer_) {
             responseBuffer_->clear();
         }
-    } else {
-        buffer_.clear();
-        responseData_.clear();
     }
+    buffer_.clear();
+    responseData_.clear();
     
-    // 重置写入偏移量
+    // 重置写入偏移量与截断标志
     writeOffset_ = 0;
+    truncated_ = false;
 }
 
 void HttpContext::resetForNextRequest() {
@@ -56,9 +56,8 @@ void HttpContext::resetForNextRequest() {
         if (responseBuffer_) {
             responseBuffer_->clear();
         }
-    } else {
-        responseData_.clear();
     }
+    responseData_.clear();
 
     writeOffset_ = 0;
     truncated_ = false;
@@ -127,43 +126,47 @@ void HttpContext::consumeData(size_t n) {
     }
 }
 
-void HttpContext::setResponseData(const std::string& data) {
+bool HttpContext::setResponseData(const std::string& data) {
+    truncated_ = false;
     if (useMemoryPool_) {
-        // 强制使用内存池，不再回退到std::string
+        // 池内单块容量有限（BLOCK_SIZE）。写不满时必须回退到 std::string，
+        // 否则响应体会被静默截断，而 Content-Length 仍声明完整长度，
+        // keep-alive 下后续响应会被当成前一响应的续传体（长连接整体错位）。
         if (!responseBuffer_) {
             responseBuffer_ = std::make_unique<utils::PooledBuffer>(memoryPool_);
         }
         responseBuffer_->clear();
-        responseBuffer_->write(data);
-    } else {
-        // 内存池未启用，使用传统方式
-        responseData_ = data;
+        size_t written = responseBuffer_->write(data);
+        if (written < data.size()) {
+            responseBuffer_.reset();          // 归还池块，避免白占
+            responseData_ = data;
+            truncated_ = true;
+            return false;
+        }
+        responseData_.clear();
+        return true;
     }
+
+    // 内存池未启用，使用传统方式
+    responseData_ = data;
+    return true;
 }
 
-void HttpContext::setResponseData(const char* data, size_t len) {
-    if (useMemoryPool_) {
-        // 强制使用内存池，不再回退到std::string
-        if (!responseBuffer_) {
-            responseBuffer_ = std::make_unique<utils::PooledBuffer>(memoryPool_);
-        }
-        responseBuffer_->clear();
-        responseBuffer_->write(data, len);
-    } else {
-        // 内存池未启用，使用传统方式
-        responseData_.assign(data, len);
-    }
+bool HttpContext::setResponseData(const char* data, size_t len) {
+    return setResponseData(std::string(data, len));
 }
 
 std::string HttpContext::getResponseData() const {
+    if (!responseData_.empty()) {
+        // 池装不下时的完整响应（以及非池模式下的响应）
+        return responseData_;
+    }
     if (useMemoryPool_) {
         if (responseBuffer_) {
             return responseBuffer_->readString(responseBuffer_->getUsedSize());
         }
-        return {};
-    } else {
-        return responseData_;
     }
+    return responseData_;
 }
 
 void HttpContext::enableMemoryPool(bool enable) {
@@ -191,17 +194,24 @@ void HttpContext::enableMemoryPool(bool enable) {
             if (!responseBuffer_) {
                 responseBuffer_ = std::make_unique<utils::PooledBuffer>(memoryPool_);
             }
-            responseBuffer_->write(responseData_);
-            responseData_.clear();
+            size_t written = responseBuffer_->write(responseData_);
+            if (written < responseData_.size()) {
+                // 装不下：保留 std::string 路径，不丢数据
+                responseBuffer_.reset();
+                truncated_ = true;
+            } else {
+                responseData_.clear();
+            }
         }
     } else {
-        // 从内存池模式切换到传统模式
+        // 从内存池模式切换到传统模式：先搬内容再析构池块
         if (requestBuffer_) {
             buffer_ = requestBuffer_->readString(requestBuffer_->getUsedSize());
             requestBuffer_.reset();
         }
         
         if (responseBuffer_) {
+            // 池路径与 std::string 路径互斥，但搬移时以"已写长度"为准
             responseData_ = responseBuffer_->readString(responseBuffer_->getUsedSize());
             responseBuffer_.reset();
         }
@@ -220,17 +230,6 @@ void HttpContext::printMemoryPoolStats() const {
         std::cout << "  Pool Total Blocks: " << memoryPool_->getTotalBlocks() << std::endl;
         std::cout << "  Pool Used Blocks: " << memoryPool_->getUsedBlocks() << std::endl;
         std::cout << "  Pool Available Blocks: " << memoryPool_->getAvailableBlocks() << std::endl;
-    }
-}
-
-bool HttpContext::hasMoreDataToWrite() const {
-    if (useMemoryPool_) {
-        if (responseBuffer_) {
-            return writeOffset_ < responseBuffer_->getUsedSize();
-        }
-        return false;
-    } else {
-        return writeOffset_ < responseData_.size();
     }
 }
 

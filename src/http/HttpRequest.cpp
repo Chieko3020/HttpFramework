@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cctype>
 #include <iomanip>
+#include <limits>
 
 namespace http {
 
@@ -12,6 +13,10 @@ HttpRequest::HttpRequest()
 
 bool HttpRequest::parse(const std::string& rawRequest) {
     rawRequest_ = rawRequest;
+    contentLengthValid_ = true;
+    contentLength_ = 0;
+    bodyConsumed_ = 0;
+    rawBodySize_ = 0;
     
     std::istringstream stream(rawRequest);
     std::string line;
@@ -72,24 +77,73 @@ bool HttpRequest::parse(const std::string& rawRequest) {
 
     // 记录原始 body 大小（chunked 解码前）
     rawBodySize_ = body_.size();
+    bodyConsumed_ = 0;
 
     // 检测 Transfer-Encoding: chunked
     bool isChunked = (getHeader("transfer-encoding").find("chunked") != std::string::npos);
 
     if (isChunked) {
-        // chunked 结束标记 "0\r\n\r\n"
-        if (body_.size() < 5 || body_.substr(body_.size() - 5) != "0\r\n\r\n") {
+        // 结束标记必须存在（解码前的原始报文中，从头找到第一个 "0\r\n\r\n"）
+        size_t endPos = rawRequest.find("0\r\n\r\n", bodyStart);
+        if (endPos == std::string::npos) {
             return false;  // 未收齐
         }
+        // chunked 的 body 边界跨越整个 chunked 报文（长度行 + 数据 + 终止块），
+        // 到 "0\r\n\r\n" 结束——其后的字节属于同一连接的下一个请求。
+        bodyConsumed_ = endPos + 5 - bodyStart;
+
         if (!decodeChunkedBody()) {
             return false;
         }
     } else {
-        // Content-Length 校验
-        size_t contentLength = getContentLength();
-        if (contentLength > 0 && body_.size() < contentLength) {
-            return false;
+        // Content-Length 校验：body 严格按 Content-Length 切分。
+        // 头部之后可能紧跟同一连接的下一个请求（管线化 / 粘包），
+        // 不切分就会把后续请求的原始字节当成业务 body 交给 handler（C5）。
+        contentLength_ = 0;
+        contentLengthValid_ = true;
+        if (hasHeader("content-length")) {
+            const std::string& clRaw = getHeader("content-length");
+            // 必须是非空纯十进制数字，且不溢出 size_t；
+            // 容忍首尾空白。畸形值显式标为非法（由调用方回 400），不能当 0。
+            std::string cl = clRaw;
+            cl.erase(0, cl.find_first_not_of(" \t"));
+            if (cl.empty()) {
+                contentLengthValid_ = false;
+            } else {
+                cl.erase(cl.find_last_not_of(" \t") + 1);
+                bool digitsOnly = !cl.empty() &&
+                    cl.find_first_not_of("0123456789") == std::string::npos;
+                if (!digitsOnly) {
+                    contentLengthValid_ = false;
+                } else {
+                    try {
+                        unsigned long long v = std::stoull(cl);
+                        if (v > std::numeric_limits<size_t>::max()) {
+                            contentLengthValid_ = false;
+                        } else {
+                            contentLength_ = static_cast<size_t>(v);
+                        }
+                    } catch (const std::exception&) {
+                        contentLengthValid_ = false;
+                    }
+                }
+            }
+            if (!contentLengthValid_) {
+                body_.clear();
+                bodyConsumed_ = 0;
+                return false;
+            }
         }
+
+        const size_t contentLength = contentLength_;
+        if (contentLength == 0) {
+            body_.clear();
+        } else if (body_.size() < contentLength) {
+            return false;  // body 未收齐
+        } else {
+            body_.resize(contentLength);
+        }
+        bodyConsumed_ = contentLength;
     }
 
     return true;
@@ -246,6 +300,10 @@ const std::string& HttpRequest::getHeader(const std::string& name) const {
     return (it != headers_.end()) ? it->second : empty;
 }
 
+bool HttpRequest::hasHeader(const std::string& name) const {
+    return headers_.find(toLowerCase(name)) != headers_.end();
+}
+
 const std::string& HttpRequest::getQuery(const std::string& name) const {
     static const std::string empty;
     auto it = queries_.find(name);
@@ -274,16 +332,7 @@ bool HttpRequest::isKeepAlive() const {
 }
 
 size_t HttpRequest::getContentLength() const {
-    std::string contentLength = getHeader("content-length");
-    if (contentLength.empty()) {
-        return 0;
-    }
-    
-    try {
-        return std::stoul(contentLength);
-    } catch (const std::exception&) {
-        return 0;
-    }
+    return contentLength_;
 }
 
 std::string HttpRequest::getContentType() const {
