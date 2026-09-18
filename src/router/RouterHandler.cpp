@@ -29,89 +29,93 @@ MiddlewareInfo::MiddlewareInfo(const std::string& path,
 }
 
 RouterHandler::RouterHandler() {
+    auto table = std::make_shared<Table>();
+
     // 设置默认404处理器
-    setNotFoundHandler([]([[maybe_unused]] const http::HttpRequest& req, http::HttpResponse& res) {
+    table->notFoundHandler = []([[maybe_unused]] const http::HttpRequest& req, http::HttpResponse& res) {
         res.setStatus(http::HttpStatus::NOT_FOUND);
         res.setHtml("<html><body><h1>404 Not Found</h1><p>The requested resource was not found.</p></body></html>");
-    });
+    };
     
     // 设置默认错误处理器
-    setErrorHandler([](const std::exception& e, [[maybe_unused]] const http::HttpRequest& req, http::HttpResponse& res) {
+    table->errorHandler = [](const std::exception& e, [[maybe_unused]] const http::HttpRequest& req, http::HttpResponse& res) {
         res.setStatus(http::HttpStatus::INTERNAL_SERVER_ERROR);
         res.setHtml("<html><body><h1>500 Internal Server Error</h1><p>An error occurred while processing your request.</p></body></html>");
         std::cerr << "[ERROR][路由]：请求处理错误: " << e.what() << std::endl;
-    });
+    };
+
+    std::atomic_store(&table_, std::shared_ptr<const Table>(std::move(table)));
+}
+
+std::shared_ptr<const RouterHandler::Table> RouterHandler::snapshot() const {
+    return std::atomic_load(&table_);
+}
+
+void RouterHandler::mutate(const std::function<void(Table&)>& fn) {
+    // 拷贝-修改-换入：注册期间请求侧始终读到一份完整、不变的旧表（H14）
+    std::shared_ptr<const Table> current = std::atomic_load(&table_);
+    auto next = std::make_shared<Table>(*current);
+    fn(*next);
+    std::atomic_store(&table_, std::shared_ptr<const Table>(std::move(next)));
 }
 
 void RouterHandler::addRoute(const std::string& method, const std::string& path, 
                             std::function<void(const http::HttpRequest&, http::HttpResponse&)> handler) {
-    routes_.emplace_back(method, path, handler);
+    mutate([&](Table& t) { t.routes.emplace_back(method, path, handler); });
 }
 
 void RouterHandler::addMiddleware(const std::string& path, 
                                  std::function<void(const http::HttpRequest&, http::HttpResponse&, std::function<void()>)> middleware) {
-    middlewares_.emplace_back(path, middleware);
+    mutate([&](Table& t) { t.middlewares.emplace_back(path, middleware); });
+}
+
+void RouterHandler::setNotFoundHandler(std::function<void(const http::HttpRequest&, http::HttpResponse&)> handler) {
+    mutate([&](Table& t) { t.notFoundHandler = std::move(handler); });
+}
+
+void RouterHandler::setErrorHandler(std::function<void(const std::exception&, const http::HttpRequest&, http::HttpResponse&)> handler) {
+    mutate([&](Table& t) { t.errorHandler = std::move(handler); });
 }
 
 bool RouterHandler::handleRequest(const http::HttpRequest& request, http::HttpResponse& response) {
+    // 一次原子读拿到本次请求的不可变表快照，全程（含中间件里的延迟调用）使用它
+    std::shared_ptr<const Table> table = snapshot();
+
     try {
-        // 查找匹配的中间件
-        auto matchedMiddlewares = findMiddlewares(request.getPath());
-        
-        // 执行中间件链
+        auto matchedMiddlewares = findMiddlewares(*table, request.getPath());
+
         if (!matchedMiddlewares.empty()) {
-            executeMiddlewareChain(request, response, [this, &request, &response]() {
-                // 中间件执行完毕，处理路由
-                std::unordered_map<std::string, std::string> params;
-                Route* route = findRoute(request.getMethodString(), request.getPath(), params);
-                
-                if (route) {
-                    // 设置路径参数
-                    for (const auto& param : params) {
-                        const_cast<http::HttpRequest&>(request).setParam(param.first, param.second);
-                    }
-                    route->handler(request, response);
-                } else {
-                    // 没有找到匹配的路由
-                    if (notFoundHandler_) {
-                        notFoundHandler_(request, response);
-                    }
-                }
-            }, 0);
+            executeMiddlewareChain(*table, request, response,
+                                   [&table, &request, &response]() {
+                                       dispatchRoute(*table, request, response);
+                                   },
+                                   0);
         } else {
-            // 没有中间件，直接处理路由
-            std::unordered_map<std::string, std::string> params;
-            Route* route = findRoute(request.getMethodString(), request.getPath(), params);
-            
-            if (route) {
-                // 设置路径参数
-                for (const auto& param : params) {
-                    const_cast<http::HttpRequest&>(request).setParam(param.first, param.second);
-                }
-                route->handler(request, response);
-            } else {
-                // 没有找到匹配的路由
-                if (notFoundHandler_) {
-                    notFoundHandler_(request, response);
-                }
-            }
+            dispatchRoute(*table, request, response);
         }
         
         return true;
     } catch (const std::exception& e) {
-        if (errorHandler_) {
-            errorHandler_(e, request, response);
+        if (table->errorHandler) {
+            table->errorHandler(e, request, response);
         }
         return false;
     }
 }
 
-void RouterHandler::setNotFoundHandler(std::function<void(const http::HttpRequest&, http::HttpResponse&)> handler) {
-    notFoundHandler_ = handler;
-}
+void RouterHandler::dispatchRoute(const Table& table, const http::HttpRequest& request,
+                                  http::HttpResponse& response) {
+    std::unordered_map<std::string, std::string> params;
+    const Route* route = findRoute(table, request.getMethodString(), request.getPath(), params);
 
-void RouterHandler::setErrorHandler(std::function<void(const std::exception&, const http::HttpRequest&, http::HttpResponse&)> handler) {
-    errorHandler_ = handler;
+    if (route) {
+        for (const auto& param : params) {
+            const_cast<http::HttpRequest&>(request).setParam(param.first, param.second);
+        }
+        route->handler(request, response);
+    } else if (table.notFoundHandler) {
+        table.notFoundHandler(request, response);
+    }
 }
 
 std::pair<std::regex, std::vector<std::string>> RouterHandler::pathToRegex(const std::string& path) {
@@ -159,24 +163,27 @@ bool RouterHandler::matchPath(const std::regex& pathRegex, const std::vector<std
     return false;
 }
 
-void RouterHandler::executeMiddlewareChain(const http::HttpRequest& request, http::HttpResponse& response,
-                                          std::function<void()> next, size_t index) {
-    auto matchedMiddlewares = findMiddlewares(request.getPath());
+void RouterHandler::executeMiddlewareChain(const Table& table, const http::HttpRequest& request,
+                                          http::HttpResponse& response, std::function<void()> next,
+                                          size_t index) {
+    auto matchedMiddlewares = findMiddlewares(table, request.getPath());
     
     if (index >= matchedMiddlewares.size()) {
         next();
         return;
     }
     
-    auto middleware = matchedMiddlewares[index];
-    middleware->middleware(request, response, [this, &request, &response, next, index]() {
-        executeMiddlewareChain(request, response, next, index + 1);
+    const MiddlewareInfo* middleware = matchedMiddlewares[index];
+    // table 由调用方的 shared_ptr 保活，这里取到的指针在整个调用链期间有效
+    middleware->middleware(request, response, [&table, &request, &response, next, index]() {
+        executeMiddlewareChain(table, request, response, next, index + 1);
     });
 }
 
-Route* RouterHandler::findRoute(const std::string& method, const std::string& path, 
-                               std::unordered_map<std::string, std::string>& params) {
-    for (auto& route : routes_) {
+const Route* RouterHandler::findRoute(const Table& table, const std::string& method,
+                                      const std::string& path,
+                                      std::unordered_map<std::string, std::string>& params) {
+    for (const auto& route : table.routes) {
         if (route.method == method && matchPath(route.pathRegex, route.paramNames, path, params)) {
             return &route;
         }
@@ -184,7 +191,7 @@ Route* RouterHandler::findRoute(const std::string& method, const std::string& pa
     // HEAD 请求回退到 GET handler（RFC 9110 §9.3.2）：
     // 响应体由 HttpServer 在序列化时抑制，因此可以安全复用 GET 的实现（H13）
     if (method == "HEAD") {
-        for (auto& route : routes_) {
+        for (const auto& route : table.routes) {
             if (route.method == "GET" &&
                 matchPath(route.pathRegex, route.paramNames, path, params)) {
                 return &route;
@@ -194,10 +201,11 @@ Route* RouterHandler::findRoute(const std::string& method, const std::string& pa
     return nullptr;
 }
 
-std::vector<MiddlewareInfo*> RouterHandler::findMiddlewares(const std::string& path) {
-    std::vector<MiddlewareInfo*> matched;
+std::vector<const MiddlewareInfo*> RouterHandler::findMiddlewares(const Table& table,
+                                                                  const std::string& path) {
+    std::vector<const MiddlewareInfo*> matched;
     
-    for (auto& middleware : middlewares_) {
+    for (const auto& middleware : table.middlewares) {
         if (std::regex_match(path, middleware.pathRegex)) {
             matched.push_back(&middleware);
         }

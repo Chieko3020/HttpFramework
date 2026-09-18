@@ -175,6 +175,7 @@ static bool peekClosed(int sock, int timeoutMs = 300) {
 struct Fixture {
     std::unique_ptr<utils::ThreadPool> pool;
     std::unique_ptr<http::HttpServer> server;
+    std::shared_ptr<router::Router> routerRef;   // 供 H14 用例在运行期注册路由
     int port = 0;
     bool started = false;
 
@@ -215,6 +216,7 @@ struct Fixture {
             res.setText("SLOWDONE");
         });
         server->setRouter(r);
+        routerRef = r;
 
         if (extra) extra(*r);   // 用例自定义路由（必须在 start() 之前注册）
 
@@ -788,6 +790,64 @@ static bool test_head_semantics() {
     return true;
 }
 
+// ── H14：运行期动态注册路由不得与请求处理竞争 ──
+static bool test_router_dynamic_registration() {
+    TEST("H14 并发请求期间动态注册 1000 条路由（无崩溃、新路由可见）");
+    Fixture f;
+    if (!f.up(60, 2, false, 4)) FAIL("服务器启动失败");
+
+    std::atomic<bool> stopReg{false};
+    std::atomic<int> registered{0};
+    std::thread reg([&]() {
+        for (int i = 0; i < 1000 && !stopReg.load(); ++i) {
+            f.routerRef->get("/dyn/" + std::to_string(i),
+                             [i](const http::HttpRequest&, http::HttpResponse& res) {
+                                 res.setText("DYN" + std::to_string(i));
+                             });
+            registered.fetch_add(1);
+        }
+    });
+
+    // 注册进行的同时持续打请求
+    std::atomic<int> ok{0};
+    std::atomic<int> bad{0};
+    auto worker = [&]() {
+        for (int i = 0; i < 300; ++i) {
+            int s = connectTo(f.port, 3000);
+            if (s < 0) { bad.fetch_add(1); continue; }
+            if (!sendAll(s, req("GET", "/small"))) { bad.fetch_add(1); close(s); continue; }
+            auto r = readResponse(s, 3000);
+            if (r.complete && r.body == "SMALL") ok.fetch_add(1);
+            else bad.fetch_add(1);
+            close(s);
+        }
+    };
+    std::vector<std::thread> ts;
+    for (int i = 0; i < 4; ++i) ts.emplace_back(worker);
+    for (auto& t : ts) t.join();
+    stopReg.store(true);
+    reg.join();
+
+    std::cout << "(已注册=" << registered.load() << " 请求成功=" << ok.load()
+              << " 失败=" << bad.load() << ") ";
+    CHECK(bad.load() == 0, "并发注册期间请求失败 " << bad.load() << " 次");
+    CHECK(registered.load() > 0, "未完成任何路由注册");
+
+    // 新注册的路由必须可见
+    int s = connectTo(f.port);
+    CHECK(s >= 0, "连接失败");
+    const int last = registered.load() - 1;
+    CHECK(sendAll(s, req("GET", "/dyn/" + std::to_string(last))), "发送失败");
+    auto r = readResponse(s, 3000);
+    CHECK(r.complete && r.body == "DYN" + std::to_string(last),
+          "运行期注册的路由不可见: '" << r.status << "' body=" << r.body);
+    close(s);
+
+    f.down();
+    PASS();
+    return true;
+}
+
 int main() {
     std::cout << "=== test_http_hardening ===" << std::endl;
     ignoreSigpipeInTest();
@@ -810,6 +870,7 @@ int main() {
     run(test_pool_limit_configurable, "H7 内存池上限可配置");
     run(test_pool_exhaustion_reported, "H8 池耗尽显式上报");
     run(test_head_semantics,          "H13 HEAD 语义");
+    run(test_router_dynamic_registration, "H14 路由运行期注册");
 
     std::cout << std::endl
               << "结果: " << g_testsPassed << " 通过, "
