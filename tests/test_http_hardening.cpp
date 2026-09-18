@@ -893,6 +893,59 @@ static bool test_app_stats_and_signal() {
     return true;
 }
 
+// ── M3：框架头冲突与超上限请求体必须明确拒绝 ──
+static bool test_request_framing_hardening() {
+    TEST("M3 Content-Length+Transfer-Encoding 冲突→400；超配置上限→413");
+    Fixture f;
+    if (!f.up()) FAIL("服务器启动失败");
+    f.server->setMaxRequestBodyBytes(1024);   // 便于测试的小上限
+
+    // 1) 冲突头：同一请求同时带 Content-Length 与 Transfer-Encoding
+    {
+        int s = connectTo(f.port);
+        CHECK(s >= 0, "连接失败");
+        std::string bad = "POST /echo HTTP/1.1\r\nHost: x\r\nContent-Length: 5\r\n"
+                          "Transfer-Encoding: chunked\r\n\r\n0\r\n\r\n";
+        CHECK(sendAll(s, bad), "发送失败");
+        auto r = readResponse(s, 3000);
+        std::cout << "(冲突头→" << (r.status.empty() ? "无响应" : r.status.substr(9, 3)) << ") ";
+        CHECK(r.complete, "冲突头请求应得到明确响应");
+        CHECK(r.status.rfind("HTTP/1.1 400", 0) == 0,
+              "Content-Length 与 Transfer-Encoding 并存应回 400, 实际: " << r.status);
+        close(s);
+    }
+
+    // 2) 超过配置上限的 Content-Length
+    {
+        int s = connectTo(f.port);
+        CHECK(s >= 0, "连接失败");
+        std::string bad = "POST /echo HTTP/1.1\r\nHost: x\r\nContent-Length: 100000\r\n\r\n";
+        CHECK(sendAll(s, bad), "发送失败");
+        auto r = readResponse(s, 3000);
+        std::cout << "(超上限→" << (r.status.empty() ? "无响应" : r.status.substr(9, 3)) << ") ";
+        CHECK(r.complete, "超上限请求应得到明确响应");
+        CHECK(r.status.rfind("HTTP/1.1 413", 0) == 0,
+              "超过 maxRequestBodyBytes 应回 413, 实际: " << r.status);
+        close(s);
+    }
+
+    // 3) 畸形 Content-Length 仍然 400（回归）
+    {
+        int s = connectTo(f.port);
+        CHECK(s >= 0, "连接失败");
+        std::string bad = "POST /echo HTTP/1.1\r\nHost: x\r\nContent-Length: 12abc\r\n\r\n";
+        CHECK(sendAll(s, bad), "发送失败");
+        auto r = readResponse(s, 3000);
+        CHECK(r.complete && r.status.rfind("HTTP/1.1 400", 0) == 0,
+              "畸形 Content-Length 应回 400, 实际: " << r.status);
+        close(s);
+    }
+
+    f.down();
+    PASS();
+    return true;
+}
+
 int main() {
     std::cout << "=== test_http_hardening ===" << std::endl;
     ignoreSigpipeInTest();
@@ -917,6 +970,7 @@ int main() {
     run(test_head_semantics,          "H13 HEAD 语义");
     run(test_router_dynamic_registration, "H14 路由运行期注册");
     run(test_app_stats_and_signal,    "H15 App 统计与信号");
+    run(test_request_framing_hardening, "M3 请求框架头加固");
 
     std::cout << std::endl
               << "结果: " << g_testsPassed << " 通过, "

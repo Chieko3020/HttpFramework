@@ -17,6 +17,8 @@ bool HttpRequest::parse(const std::string& rawRequest) {
     contentLength_ = 0;
     bodyConsumed_ = 0;
     rawBodySize_ = 0;
+    conflictingFraming_ = false;
+    bodyTooLarge_ = false;
     
     std::istringstream stream(rawRequest);
     std::string line;
@@ -82,6 +84,15 @@ bool HttpRequest::parse(const std::string& rawRequest) {
     // 检测 Transfer-Encoding: chunked
     bool isChunked = (getHeader("transfer-encoding").find("chunked") != std::string::npos);
 
+    // RFC 9112 §6.1：Content-Length 与 Transfer-Encoding 同时出现时必须拒绝。
+    // 若不拒绝，两端可能用不同的框架解析同一段字节（请求走私面）（M3）
+    if (isChunked && hasHeader("content-length")) {
+        conflictingFraming_ = true;
+        body_.clear();
+        bodyConsumed_ = 0;
+        return false;
+    }
+
     if (isChunked) {
         // 结束标记必须存在（解码前的原始报文中，从头找到第一个 "0\r\n\r\n"）
         size_t endPos = rawRequest.find("0\r\n\r\n", bodyStart);
@@ -129,6 +140,14 @@ bool HttpRequest::parse(const std::string& rawRequest) {
                 }
             }
             if (!contentLengthValid_) {
+                body_.clear();
+                bodyConsumed_ = 0;
+                return false;
+            }
+            // 上界检查：无上界的 Content-Length 会让对端用一个数字就让服务端
+            // 在缓冲区里无限等待，或让 bodyConsumed_ 越过真实缓冲区（M3）
+            if (contentLength_ > maxBodySize_) {
+                bodyTooLarge_ = true;
                 body_.clear();
                 bodyConsumed_ = 0;
                 return false;

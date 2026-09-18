@@ -783,8 +783,23 @@ void HttpServer::dispatchBufferedRequests(int clientFd, int subReactorIndex,
     if (ctxPtr->hasCurrentResponse()) return;
 
     auto request = std::make_shared<HttpRequest>();
+    request->setMaxBodySize(maxRequestBodyBytes_);
     const std::string buffered = ctxPtr->getData();
     if (!request->parse(buffered)) {
+        if (request->hasConflictingFraming() || request->isBodyTooLarge()) {
+            // 自相矛盾的框架头 / 超过配置上限的请求体：明确 400/413，且不可复用连接
+            const bool tooLarge = request->isBodyTooLarge();
+            auto response = std::make_shared<HttpResponse>();
+            response->setStatus(tooLarge ? 413 : 400,
+                                tooLarge ? "Payload Too Large" : "Bad Request");
+            response->setJson(tooLarge
+                                  ? R"({"error":"Request body too large"})"
+                                  : R"({"error":"Conflicting Content-Length and Transfer-Encoding"})");
+            response->setHeader("Connection", "close");
+            response->markFinalized();
+            enqueueRequestTask(subReactorIndex, clientFd, connId, request, response);
+            return;
+        }
         if (!request->isContentLengthValid()) {
             // 畸形 Content-Length 必须显式拒绝：按 0 处理会让 body 被当成下一个
             // 请求解析，是请求走私面。此连接状态已不可信，响应后关闭。
@@ -806,11 +821,16 @@ void HttpServer::dispatchBufferedRequests(int clientFd, int subReactorIndex,
     // （或 chunked 报文实际长度）切分的 body。不能用"头部之后整段缓冲区"的长度，
     // 否则同一连接上管线化的后续请求会被一并吞掉（C3），body 也会带上后续请求（C5）。
     const size_t available = buffered.size();
-    size_t consumed = request->getHeaderEnd() + request->getHeaderEndSepLen() +
-                      request->getBodyConsumed();
-    if (consumed == 0 || consumed > available) {
-        // 防御：越界消费会让解析器读空缓冲区或反复响应同一段数据
-        rearmRead(clientFd, subReactorIndex, connId);
+    // 消费量只由"本次请求自身"决定：头部结束符 + 头部长度 sep + 本次 body 字节数。
+    // parse() 成功时 headerEndSepLen_ 必为 2 或 4，因此 consumed 恒 > 0 —— 旧代码里
+    // `consumed == 0` 那支是不可达的死防御（M2）。真正会出事的是 consumed > available
+    // （一旦消费量语义被改坏，就会读空缓冲区并反复响应同一段数据），保留这支边界检查。
+    const size_t consumed = request->getHeaderEnd() + request->getHeaderEndSepLen() +
+                            request->getBodyConsumed();
+    if (consumed > available) {
+        std::cerr << "[ERROR][HTTP服务器]：请求消费量越界, consumed=" << consumed
+                  << " available=" << available << " fd=" << clientFd << std::endl;
+        closeConnection(clientFd, subReactorIndex);
         return;
     }
 

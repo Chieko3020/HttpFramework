@@ -68,6 +68,12 @@ public:
     void setIdleTimeout(int seconds) { idleTimeoutSec_ = seconds; }
     int idleTimeout() const { return idleTimeoutSec_; }
 
+    // 单请求体上限（字节，默认 64MB）：超过时回 413 而不是让服务端无限等待（M3）
+    void setMaxRequestBodyBytes(size_t bytes) {
+        maxRequestBodyBytes_ = bytes > 0 ? bytes : 1;
+    }
+    size_t maxRequestBodyBytes() const { return maxRequestBodyBytes_; }
+
     static bool isPortInUse(int port);
 
     struct Statistics {
@@ -152,6 +158,9 @@ private:
 
     // 空闲连接超时（秒）
     int idleTimeoutSec_{60};
+
+    // 单请求体上限（M3）
+    size_t maxRequestBodyBytes_{64u * 1024u * 1024u};
 
     // stop() 关停排空（H3）：在途任务计数 + 归零通知
     std::atomic<uint64_t> inFlightTasks_{0};

@@ -67,6 +67,15 @@ public:
     // 畸形值（非纯数字 / 溢出）必须被显式拒绝，否则会被当作 0 处理，
     // 让该请求的 body 被解析成"下一个请求"，构成请求走私面。
     bool isContentLengthValid() const { return contentLengthValid_; }
+
+    // 请求头自相矛盾（Content-Length 与 Transfer-Encoding 同时存在）：
+    // 按 RFC 9112 §6.1 必须拒绝，否则两端对报文边界的理解可能不一致 → 请求走私面（M3）
+    bool hasConflictingFraming() const { return conflictingFraming_; }
+
+    // 请求体上限（可由 HttpServer 配置）：超过则视为不可接受（回 413 而不是当作 0 处理）
+    void setMaxBodySize(size_t maxBytes) { maxBodySize_ = maxBytes; }
+    size_t getMaxBodySize() const { return maxBodySize_; }
+    bool isBodyTooLarge() const { return bodyTooLarge_; }
     
     // 获取头部结束位置（用于计算已消费数据量，解决粘包问题）
     size_t getHeaderEnd() const { return headerEnd_; }
@@ -104,6 +113,9 @@ private:
     size_t bodyConsumed_ = 0;     // 本次请求在原始缓冲区中占用 body 的字节数
     size_t contentLength_ = 0;    // 解析后的 Content-Length
     bool contentLengthValid_ = true;  // Content-Length 语法是否合法
+    bool conflictingFraming_ = false; // CL 与 TE 同时存在
+    bool bodyTooLarge_ = false;       // 超过 maxBodySize_
+    size_t maxBodySize_ = 64u * 1024u * 1024u;  // 默认 64MB 上限（M3）
     
     // 解析请求行
     bool parseRequestLine(const std::string& line);
