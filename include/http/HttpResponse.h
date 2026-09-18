@@ -95,6 +95,9 @@ private:
     
     // 获取状态码对应的原因短语
     std::string getReasonPhrase(int statusCode) const;
+
+    // 头名归一化：小写键 + 规范拼写（M10）
+    static std::string canonicalHeaderName(const std::string& name);
     
     // 获取当前时间字符串（用于Date头部）
     std::string getCurrentTime() const;

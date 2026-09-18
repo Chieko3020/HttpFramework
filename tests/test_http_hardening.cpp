@@ -14,6 +14,7 @@
 // 断言的口径都来自"客户端可观测行为"，不依赖内部实现细节。
 
 #include "HttpFramework.h"   // H15：App 级统计/信号
+#include "http/HttpResponse.h"
 #include "http/HttpServer.h"
 #include "router/Router.h"
 #include "utils/SocketCompat.h"
@@ -1048,6 +1049,26 @@ static bool test_request_buffer_limits() {
     return true;
 }
 
+// ── M10：头名大小写归一化，不得产生重复 Content-Length ──
+static bool test_header_normalization() {
+    TEST("M10 不同大小写设置同名头不会产生重复 Content-Length");
+    http::HttpResponse res;
+    res.setHeader("content-length", "3");
+    res.setBody("abc");                       // 内部再设一次 Content-Length
+    res.setHeader("CONTENT-TYPE", "text/plain");
+    CHECK(res.getHeader("Content-Length") == "3", "大小写不敏感读取应生效");
+    CHECK(res.getHeader("content-type") == "text/plain", "小写读取应生效");
+
+    const std::string out = res.toString();
+    std::size_t count = 0, pos = 0;
+    while ((pos = out.find("Content-Length:", pos)) != std::string::npos) { ++count; pos += 1; }
+    std::cout << "(Content-Length 出现 " << count << " 次) ";
+    CHECK(count == 1, "响应中必须只有一个 Content-Length, 实际 " << count << " 个");
+
+    PASS();
+    return true;
+}
+
 int main() {
     std::cout << "=== test_http_hardening ===" << std::endl;
     ignoreSigpipeInTest();
@@ -1075,6 +1096,7 @@ int main() {
     run(test_request_framing_hardening, "M3 请求框架头加固");
     run(test_reason_phrase_and_url_decode, "M9/M11 原因短语与解码");
     run(test_request_buffer_limits,   "M4 请求缓冲上限/慢速滴灌");
+    run(test_header_normalization,    "M10 响应头归一化");
 
     std::cout << std::endl
               << "结果: " << g_testsPassed << " 通过, "

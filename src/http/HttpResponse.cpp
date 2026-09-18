@@ -1,5 +1,7 @@
 #include "http/HttpResponse.h"
 #include <sstream>
+#include <mutex>
+#include <cctype>
 #include <iomanip>
 #include <ctime>
 #include <fstream>
@@ -24,8 +26,51 @@ void HttpResponse::setStatus(int statusCode, const std::string& reasonPhrase) {
     reasonPhrase_ = reasonPhrase.empty() ? getReasonPhrase(statusCode) : reasonPhrase;
 }
 
+// 头名归一化（M10）：统一按小写键存储、按规范拼写输出。
+// 旧实现直接以调用方给的拼写做键，"content-length" 与 "Content-Length" 会成为
+// 两个不同的键 → 响应里出现重复的 Content-Length（响应拆分/缓存投毒面）。
+std::string HttpResponse::canonicalHeaderName(const std::string& name) {
+    static const std::pair<const char*, const char*> kKnown[] = {
+        {"content-length", "Content-Length"},   {"content-type", "Content-Type"},
+        {"set-cookie", "Set-Cookie"},           {"connection", "Connection"},
+        {"server", "Server"},                   {"date", "Date"},
+        {"location", "Location"},               {"transfer-encoding", "Transfer-Encoding"},
+        {"cache-control", "Cache-Control"},     {"etag", "ETag"},
+        {"last-modified", "Last-Modified"},     {"content-encoding", "Content-Encoding"},
+        {"www-authenticate", "WWW-Authenticate"},
+        {"access-control-allow-origin", "Access-Control-Allow-Origin"},
+        {"access-control-allow-methods", "Access-Control-Allow-Methods"},
+        {"access-control-allow-headers", "Access-Control-Allow-Headers"},
+    };
+
+    // 先求小写
+    std::string lower;
+    lower.reserve(name.size());
+    for (unsigned char c : name) {
+        lower.push_back(static_cast<char>(std::tolower(c)));
+    }
+    // 去掉首尾空白
+    const auto b = lower.find_first_not_of(" \t");
+    if (b == std::string::npos) return lower;
+    const auto e = lower.find_last_not_of(" \t");
+    lower = lower.substr(b, e - b + 1);
+
+    for (const auto& kv : kKnown) {
+        if (lower == kv.first) return kv.second;
+    }
+
+    // 未知头：每个 '-' 分隔段的词首字母大写
+    std::string out = lower;
+    bool upper = true;
+    for (char& c : out) {
+        if (c == '-') { upper = true; continue; }
+        if (upper) { c = static_cast<char>(std::toupper(static_cast<unsigned char>(c))); upper = false; }
+    }
+    return out;
+}
+
 void HttpResponse::setHeader(const std::string& name, const std::string& value) {
-    headers_[name] = value;
+    headers_[canonicalHeaderName(name)] = value;
 }
 
 void HttpResponse::setContentType(const std::string& contentType) {
@@ -109,30 +154,46 @@ void HttpResponse::redirect(const std::string& url, HttpStatus status) {
 
 const std::string& HttpResponse::getHeader(const std::string& name) const {
     static const std::string empty;
-    auto it = headers_.find(name);
+    // 归一化后查找：getHeader("content-type") 与 getHeader("Content-Type") 等价（M10）
+    auto it = headers_.find(canonicalHeaderName(name));
     return (it != headers_.end()) ? it->second : empty;
 }
 
 std::string HttpResponse::toString(bool suppressBody) const {
-    std::ostringstream oss;
-    
+    // 直接拼接 + 预留容量（M8）：旧实现用 ostringstream，除最终 str() 外
+    // 还要维护其内部缓冲，每次响应至少多一次整块分配/拷贝。
+    std::size_t reserveSize = 32 + reasonPhrase_.size() + body_.size();
+    for (const auto& header : headers_) {
+        reserveSize += header.first.size() + header.second.size() + 4;
+    }
+
+    std::string out;
+    out.reserve(reserveSize);
+
     // 状态行
-    oss << "HTTP/1.1 " << statusCode_ << " " << reasonPhrase_ << "\r\n";
-    
+    out += "HTTP/1.1 ";
+    out += std::to_string(statusCode_);
+    out += ' ';
+    out += reasonPhrase_;
+    out += "\r\n";
+
     // 头部
     for (const auto& header : headers_) {
-        oss << header.first << ": " << header.second << "\r\n";
+        out += header.first;
+        out += ": ";
+        out += header.second;
+        out += "\r\n";
     }
-    
+
     // 空行
-    oss << "\r\n";
-    
+    out += "\r\n";
+
     // 响应体（HEAD 请求只发头部，但 Content-Length 仍是完整长度）
     if (!suppressBody) {
-        oss << body_;
+        out += body_;
     }
-    
-    return oss.str();
+
+    return out;
 }
 
 void HttpResponse::clear() {
@@ -204,13 +265,26 @@ std::string HttpResponse::getReasonPhrase(int statusCode) const {
 }
 
 std::string HttpResponse::getCurrentTime() const {
-    std::time_t now = std::time(nullptr);
+    // Date 按秒缓存（M8）：同一秒内的所有响应复用同一个字符串，
+    // 不再每个响应都走一遍 gmtime + put_time + ostringstream。
+    static std::mutex mu;
+    static std::time_t cachedSecond = 0;
+    static std::string cachedValue;
+
+    const std::time_t now = std::time(nullptr);
+
+    std::lock_guard<std::mutex> lk(mu);
+    if (now == cachedSecond && !cachedValue.empty()) {
+        return cachedValue;
+    }
+
     std::tm tm;
     ::gmtime_r(&now, &tm);
-    
     std::ostringstream oss;
     oss << std::put_time(&tm, "%a, %d %b %Y %H:%M:%S GMT");
-    return oss.str();
+    cachedSecond = now;
+    cachedValue = oss.str();
+    return cachedValue;
 }
 
 } // namespace http
