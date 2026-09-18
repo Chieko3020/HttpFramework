@@ -12,6 +12,7 @@
 #ifdef ENABLE_WSS
 
 #include "HttpFramework/wss/WssReactor.h"
+#include "utils/SocketCompat.h"   // net::ensureSigpipeIgnored：本进程同时充当客户端
 #include "HttpFramework/wss/WsRouter.h"
 #include "HttpFramework/wss/WebSocketCodec.h"
 #include "utils/ThreadPool.h"
@@ -534,6 +535,11 @@ static bool test_fragment_limit(const std::string& cert, const std::string& key)
 
 int main() {
     std::cout << "=== test_wss_hardening ===" << std::endl;
+
+    // 本进程既是服务端又是客户端：客户端向"已被服务端关闭的连接"写入会收到
+    // SIGPIPE（默认动作是终止进程）。HTTP 侧由 HttpServer 构造时忽略，WSS 侧
+    // 由测试自己兜底。
+    http::net::ensureSigpipeIgnored();
 
     auto [cert, key] = generateCertKeyPair("wssh");
 
