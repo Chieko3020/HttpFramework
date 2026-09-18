@@ -38,6 +38,9 @@ struct WssConnectionState {
     wss::WebSocketStreamParser ws;
     std::atomic<bool> closing{false};  // atomic: reactor thread 写入, TP worker 读取
     bool ws_upgraded{false};
+    // 关闭码：正常关闭 1000、going away 1001、异常断开 1006（默认）、
+    // 协议错误 1002、消息过大 1009…；由 onClose 回调上报（H11）
+    uint16_t closeCode{1006};
 
     std::deque<WssOutboundItem> outbound;
     std::mutex outbound_mu;
@@ -45,6 +48,9 @@ struct WssConnectionState {
     std::chrono::steady_clock::time_point last_activity;
     std::chrono::steady_clock::time_point last_ping;
     std::chrono::steady_clock::time_point last_server_ping_sent;
+    // 进入 closing 后允许等待关闭帧发出去的最晚时刻；到期强制关闭，
+    // 避免"关闭帧已发出但连接一直挂着"的僵尸连接（H11/M14）
+    std::chrono::steady_clock::time_point close_deadline;
 
     std::unordered_map<std::string, std::string> userData;
     std::string remoteAddr;

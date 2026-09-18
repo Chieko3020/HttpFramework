@@ -75,6 +75,19 @@ std::size_t WebSocketStreamParser::maxPayloadLimit() {
     return cached;
 }
 
+std::size_t WebSocketStreamParser::maxMessageLimit() {
+    static std::size_t cached = 0;
+    if (cached != 0) return cached;
+    cached = maxPayloadLimit();   // 默认与单帧上限一致
+    const char* v = std::getenv("HTTPFW_WSS_MAX_MESSAGE_BYTES");
+    if (!v) return cached;
+    try {
+        std::size_t parsed = static_cast<std::size_t>(std::stoul(v));
+        if (parsed >= 1024) cached = parsed;
+    } catch (...) {}
+    return cached;
+}
+
 bool WebSocketStreamParser::acceptNonce(const std::string& nonce) {
     static std::mutex mutex;
     static std::unordered_map<std::string, uint64_t> seen;
@@ -286,6 +299,7 @@ bool WebSocketStreamParser::feed(const uint8_t* data, std::size_t len,
     }
 
     const std::size_t kMaxPayload = maxPayloadLimit();
+    const std::size_t kMaxMessage = maxMessageLimit();
 
     while (true) {
         if (buffer_.size() - parse_offset_ < 2) break;
@@ -297,16 +311,16 @@ bool WebSocketStreamParser::feed(const uint8_t* data, std::size_t len,
         bool fin = (b0 & 0x80) != 0;
         uint8_t opcode = b0 & 0x0F;
         bool rsv = (b0 & 0x70) != 0;
-        if (rsv) throw std::runtime_error("RSV bits set");
+        if (rsv) throw WsProtocolError("RSV bits set", 1002);
 
         bool masked = (b1 & 0x80) != 0;
         uint64_t payload_len = static_cast<uint64_t>(b1 & 0x7F);
         idx += 2;
 
         if (opcode >= 0x8 && opcode <= 0xF) {
-            if (!fin) throw std::runtime_error("Control frames must not be fragmented");
+            if (!fin) throw WsProtocolError("Control frames must not be fragmented", 1002);
             if (payload_len > 125)
-                throw std::runtime_error("Control frame payload too large");
+                throw WsProtocolError("Control frame payload too large", 1002);
         }
 
         if (payload_len == 126) {
@@ -323,7 +337,7 @@ bool WebSocketStreamParser::feed(const uint8_t* data, std::size_t len,
         }
 
         if (payload_len > kMaxPayload)
-            throw std::runtime_error("WS payload too large");
+            throw WsProtocolError("WS payload too large", 1009);
 
         uint8_t mask_key[4] = {0, 0, 0, 0};
         if (masked) {
@@ -332,7 +346,7 @@ bool WebSocketStreamParser::feed(const uint8_t* data, std::size_t len,
             idx += 4;
         } else {
             if (require_mask_)
-                throw std::runtime_error("Masked bit not set on incoming frame");
+                throw WsProtocolError("Masked bit not set on incoming frame", 1002);
         }
 
         if (buffer_.size() - idx < payload_len) break;
@@ -352,7 +366,11 @@ bool WebSocketStreamParser::feed(const uint8_t* data, std::size_t len,
 
         // 分片消息处理
         if (opcode == 0x0) {
-            if (!in_fragment_) throw std::runtime_error("Unexpected continuation frame");
+            if (!in_fragment_)
+                throw WsProtocolError("Unexpected continuation frame", 1002);
+            // 累计上限：每个分片各自合规还不够，总量必须有界（H12）
+            if (fragment_payload_.size() + payload.size() > kMaxMessage)
+                throw WsProtocolError("Fragmented message too large", 1009);
             fragment_payload_.insert(fragment_payload_.end(), payload.begin(), payload.end());
             if (fin) {
                 WsFrame f;
@@ -368,7 +386,8 @@ bool WebSocketStreamParser::feed(const uint8_t* data, std::size_t len,
         }
 
         if (opcode == 0x1 || opcode == 0x2) {
-            if (in_fragment_) throw std::runtime_error("New data frame while fragmented");
+            if (in_fragment_)
+                throw WsProtocolError("New data frame while fragmented", 1002);
             if (fin) {
                 WsFrame f;
                 f.opcode = opcode;
@@ -376,6 +395,8 @@ bool WebSocketStreamParser::feed(const uint8_t* data, std::size_t len,
                 f.payload = std::move(payload);
                 if (outFrames) outFrames->push_back(std::move(f));
             } else {
+                if (payload.size() > kMaxMessage)
+                    throw WsProtocolError("Fragmented message too large", 1009);
                 in_fragment_ = true;
                 fragment_opcode_ = opcode;
                 fragment_payload_ = std::move(payload);
@@ -386,7 +407,14 @@ bool WebSocketStreamParser::feed(const uint8_t* data, std::size_t len,
         // 控制帧
         if (opcode == 0x8 || opcode == 0x9 || opcode == 0xA) {
             if (opcode == 0x8 && payload.size() == 1)
-                throw std::runtime_error("Invalid close payload length");
+                throw WsProtocolError("Invalid close payload length", 1002);
+            if (opcode == 0x8 && payload.size() >= 2) {
+                uint16_t code = static_cast<uint16_t>((payload[0] << 8) | payload[1]);
+                // RFC 6455 §7.4.1：非法/保留关闭码要以 1002 关闭（L9）
+                if (code < 1000 || code >= 5000 || code == 1004 || code == 1005 ||
+                    code == 1006 || code == 1015 || (code > 1011 && code < 3000))
+                    throw WsProtocolError("Invalid close code in close frame", 1002);
+            }
             if (outFrames) {
                 WsFrame f;
                 f.opcode = opcode;
@@ -397,7 +425,7 @@ bool WebSocketStreamParser::feed(const uint8_t* data, std::size_t len,
             continue;
         }
 
-        throw std::runtime_error("Unknown opcode");
+        throw WsProtocolError("Unknown opcode", 1002);
     }
 
     if (parse_offset_ > 0) {

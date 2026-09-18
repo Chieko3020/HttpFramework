@@ -36,6 +36,8 @@ struct WssReactorState {
 
     std::unordered_map<int, std::shared_ptr<WssConnection>> conns;
     uint64_t nextConnId{1};
+    // 用于在断开时回调 onClose（非拥有指针，由 WssReactor 持有 shared_ptr）（H11）
+    WsRouter* wsRouter{nullptr};
 
     // 指标
     std::atomic<uint64_t> tx_queue_peak{0};

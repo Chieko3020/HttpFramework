@@ -4,6 +4,7 @@
 // 移植自 WebsocketServer，命名空间改为 http::wss
 
 #include <cstdint>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -14,6 +15,16 @@ struct WsFrame {
     uint8_t opcode{0};  // 1=text, 2=binary, 8=close, 9=ping, 10=pong, 0=continuation
     bool fin{true};
     std::vector<uint8_t> payload;
+};
+
+// 解析器抛出的协议错误，携带 RFC 6455 要求的关闭码：
+//   1002 = protocol error（帧格式/状态机违规）
+//   1009 = message too big（单帧或分片累计超过上限）
+//   1007 = invalid payload data（UTF-8 校验失败，见 L9）
+struct WsProtocolError : std::runtime_error {
+    uint16_t closeCode;
+    WsProtocolError(const std::string& what, uint16_t code)
+        : std::runtime_error(what), closeCode(code) {}
 };
 
 // WebSocket 编码辅助类（RFC 6455）
@@ -66,7 +77,11 @@ public:
 
     // nonce 一次性校验（防重放）：同值在 TTL 内只能通过一次
     static bool acceptNonce(const std::string& nonce);
+    // 单帧 payload 上限（HTTPFW_WSS_MAX_PAYLOAD_BYTES，默认 64KB）
     static std::size_t maxPayloadLimit();
+    // 单条消息（分片重组后）的累计上限（HTTPFW_WSS_MAX_MESSAGE_BYTES，默认同上）。
+    // 只有单帧上限时，攻击者可以用"多个刚好合规的分片"把进程内存耗尽（H12）。
+    static std::size_t maxMessageLimit();
 
 private:
     State state_{State::AwaitingHttpUpgrade};

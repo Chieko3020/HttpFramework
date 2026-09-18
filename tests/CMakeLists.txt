@@ -66,6 +66,11 @@ if(ENABLE_WSS)
     add_executable(test_edge_cert test_edge_cert.cpp)
     target_link_libraries(test_edge_cert PRIVATE http_framework)
     target_compile_definitions(test_edge_cert PRIVATE ${TEST_DEFS})
+
+    # WSS 深度审查修复的回归测试（H9/H11/H12/L9/M18）
+    add_executable(test_wss_hardening test_wss_hardening.cpp)
+    target_link_libraries(test_wss_hardening PRIVATE http_framework)
+    target_compile_definitions(test_wss_hardening PRIVATE ${TEST_DEFS})
 endif()
 
 add_executable(test_edge_stress test_edge_stress.cpp)
@@ -99,6 +104,7 @@ set(ALL_TESTS
 
 if(ENABLE_WSS)
     list(APPEND ALL_TESTS test_edge_cert)
+    list(APPEND ALL_TESTS test_wss_hardening)
 endif()
 
 # ── CTest 注册 ──

@@ -34,7 +34,11 @@ public:
     // ── 分发（由 WssReactor 在线程池中调用）──
     void dispatch(const std::string& upgradePath, WssConnection& conn, WsMessage& msg);
 
-    // ── 生命周期通知（由 WssReactor 在 IO 线程调用）──
+    // ── 生命周期通知（由 WssReactor 在 **I/O 线程** 调用）──
+    // 注意：onOpen/onClose 都在 I/O 线程执行，回调里不要做阻塞操作；
+    // code 是本次连接的关闭码（正常 1000 / going away 1001 / 异常 1006 /
+    // 协议错误 1002 / 消息过大 1009）。onClose 在 close(fd) 之前调用，
+    // 此时连接对象仍然有效（conn.isOpen() 已为 false）。
     void onOpen(const std::string& upgradePath, WssConnection& conn);
     void onClose(const std::string& upgradePath, WssConnection& conn, uint16_t code);
 

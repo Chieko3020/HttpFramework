@@ -59,6 +59,8 @@ void WssConnection::close(uint16_t code) {
     std::lock_guard<std::mutex> lk(state.outbound_mu);
     if (state.closing) return;
     state.closing = true;
+    state.closeCode = code;   // 供 onClose 上报（H11）
+    state.close_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(1);
     auto closeFrame = wss::WebSocketCodec::buildClose(code);
     WssOutboundItem item; item.data = std::move(closeFrame); item.offset = 0;
     state.outbound.push_back(std::move(item));
@@ -85,6 +87,9 @@ namespace wss {
 // ══════════════════════════════════════════════════════════════════════
 
 namespace {
+
+// 关闭帧发出后允许的最长滞留时间：到期强制 close(fd)
+constexpr auto kCloseGrace = std::chrono::milliseconds(1000);
 
 bool isValidCloseCode(uint16_t code) {
     if (code < 1000 || code >= 5000) return false;
@@ -228,8 +233,18 @@ void closeConnection(WssReactorState* st, int fd) {
     epoll_event ev;
     std::memset(&ev, 0, sizeof(ev));
     epoll_ctl(st->epoll_fd, EPOLL_CTL_DEL, fd, &ev);
+
+    // onClose 必须在 ::close 之前调用（H11）：
+    // 此前全仓没有任何调用者，onOpen/onClose 不对称，用户侧资源回收永不执行。
+    // 回调运行在 I/O 线程（见 WsRouter.h 的说明）。
+    if (st->wsRouter && c->state.ws_upgraded) {
+        st->wsRouter->onClose(c->state.upgradePath, *c, c->state.closeCode);
+        c->state.ws_upgraded = false;   // 防重入：closeConnection 可能被重复调用
+    }
+
     if (c->state.fd >= 0) { ::close(c->state.fd); c->state.fd = -1; }
-    std::cout << "[INFO][WSS]：连接关闭, fd=" << fd << " id=" << c->id() << std::endl;
+    std::cout << "[INFO][WSS]：连接关闭, fd=" << fd << " id=" << c->id()
+              << " code=" << c->state.closeCode << std::endl;
 }
 
 // ── 消息处理 ────────────────────────────────────────────────────────
@@ -254,6 +269,23 @@ bool processWsInboundBuffer(WssReactorState* st, int fd,
 
     try {
         c->state.ws.feed(buf, static_cast<std::size_t>(ret), &acceptResp, &frames);
+    } catch (const WsProtocolError& ex) {
+        // RFC 6455：以协议错误对应的关闭码回一个 close 帧再断开
+        // （1002 协议错误 / 1007 非法 UTF-8 / 1009 消息过大）
+        std::cerr << "[ERROR][WSS]：协议错误, id=" << c->id() << ": " << ex.what()
+                  << " (close=" << ex.closeCode << ")" << std::endl;
+        c->state.closeCode = ex.closeCode;
+        c->state.closing = true;
+        c->state.close_deadline = std::chrono::steady_clock::now() + kCloseGrace;
+        auto closeFrame = WebSocketCodec::buildClose(ex.closeCode);
+        {
+            std::lock_guard<std::mutex> lk(c->state.outbound_mu);
+            WssOutboundItem item; item.data = std::move(closeFrame); item.offset = 0;
+            c->state.outbound.push_back(std::move(item));
+        }
+        updateInterest(st->epoll_fd, c->state.fd, true);
+        if (c->state.tls_done) flushOutbound(st, c);
+        return false;
     } catch (const std::exception& ex) {
         std::cerr << "[ERROR][WSS]：帧解析失败, id=" << c->id() << ": " << ex.what() << std::endl;
         return false;
@@ -307,11 +339,14 @@ bool processWsInboundBuffer(WssReactorState* st, int fd,
         if (frame.opcode == 0xA) { c->state.last_ping = std::chrono::steady_clock::now(); continue; }
         if (frame.opcode == 0x8) {
             c->state.closing = true;
+            c->state.close_deadline = std::chrono::steady_clock::now() + kCloseGrace;
             uint16_t code = 1000;
             if (frame.payload.size() >= 2) {
                 code = static_cast<uint16_t>((frame.payload[0] << 8) | frame.payload[1]);
+                // 客户端发来的非法码（解析器已在 L9 里拒绝大部分）→ 1002
                 if (!isValidCloseCode(code)) code = 1002;
             }
+            c->state.closeCode = code;   // 供 onClose 上报（H11）
             auto closeResp = WebSocketCodec::buildClose(code);
             {
                 std::lock_guard<std::mutex> lk(c->state.outbound_mu);
@@ -469,7 +504,10 @@ WssReactor::WssReactor(uint16_t port, const std::string& certFile,
 
 WssReactor::~WssReactor() { stop(); }
 
-void WssReactor::setWsRouter(std::shared_ptr<WsRouter> router) { wsRouter_ = std::move(router); }
+void WssReactor::setWsRouter(std::shared_ptr<WsRouter> router) {
+    wsRouter_ = std::move(router);
+    st.wsRouter = wsRouter_.get();   // 断开路径要在 I/O 线程回调 onClose（H11）
+}
 void WssReactor::setFileTransferPlugin(std::shared_ptr<FileTransferPlugin> ftp) { ftPlugin_ = std::move(ftp); }
 void WssReactor::setWsIdleTimeout(int s) { st.idleTimeoutSec = s > 0 ? s : 120; }
 void WssReactor::setWsPingInterval(int s) { st.pingIntervalSec = s > 0 ? s : 40; }
@@ -571,7 +609,18 @@ void WssReactor::reactorLoop() {
                 }
                 std::vector<int> toClose;
                 for (const auto& kv : st.conns) {
-                    auto diff = std::chrono::duration_cast<std::chrono::seconds>(now - kv.second->state.last_ping);
+                    auto& s = kv.second->state;
+                    if (s.closing) {
+                        // 关闭态：关闭帧已发出就直接收尾；否则超过宽限期强制关闭（H11/M14）
+                        bool drained;
+                        {
+                            std::lock_guard<std::mutex> lk(s.outbound_mu);
+                            drained = s.outbound.empty();
+                        }
+                        if (drained || now > s.close_deadline) toClose.push_back(kv.first);
+                        continue;
+                    }
+                    auto diff = std::chrono::duration_cast<std::chrono::seconds>(now - s.last_ping);
                     if (diff.count() > st.idleTimeoutSec) toClose.push_back(kv.first);
                 }
                 for (int cfd : toClose) closeConnection(&st, cfd);
@@ -673,6 +722,19 @@ void WssReactor::reactorLoop() {
                     if (err == SSL_ERROR_WANT_WRITE) { updateInterest(st.epoll_fd, fd, true); break; }
                     closeConnection(&st, fd); break;
                 }
+            }
+
+            // 连接已进入关闭态且关闭帧已排空：立即收尾，不要等下一次事件。
+            // 修复前这里依赖"先武装 EPOLLOUT 再清掉"的时序，关闭帧发出后
+            // 连接既不会被 EPOLLOUT 收尾（兴趣位已被 flushOutbound 清掉），
+            // 也不会被空闲清理处理（closing 连接被跳过）→ 僵尸连接（H11）。
+            if (c->state.closing) {
+                bool drained;
+                {
+                    std::lock_guard<std::mutex> lk(c->state.outbound_mu);
+                    drained = c->state.outbound.empty();
+                }
+                if (drained) { closeConnection(&st, fd); continue; }
             }
 
             if (e & EPOLLOUT) {
