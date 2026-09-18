@@ -113,7 +113,7 @@ const std::string& HttpResponse::getHeader(const std::string& name) const {
     return (it != headers_.end()) ? it->second : empty;
 }
 
-std::string HttpResponse::toString() const {
+std::string HttpResponse::toString(bool suppressBody) const {
     std::ostringstream oss;
     
     // 状态行
@@ -127,8 +127,10 @@ std::string HttpResponse::toString() const {
     // 空行
     oss << "\r\n";
     
-    // 响应体
-    oss << body_;
+    // 响应体（HEAD 请求只发头部，但 Content-Length 仍是完整长度）
+    if (!suppressBody) {
+        oss << body_;
+    }
     
     return oss.str();
 }

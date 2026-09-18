@@ -69,8 +69,10 @@ public:
     // 获取响应体
     const std::string& getBody() const { return body_; }
     
-    // 生成HTTP响应字符串
-    std::string toString() const;
+    // 生成HTTP响应字符串。
+    // suppressBody=true 时只输出状态行与头部（保留 Content-Length），
+    // 供 HEAD 请求使用（RFC 9110 §9.3.2：HEAD 的响应不得携带消息体）（H13）
+    std::string toString(bool suppressBody = false) const;
     
     // 清空响应
     void clear();

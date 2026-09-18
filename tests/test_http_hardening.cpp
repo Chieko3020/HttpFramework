@@ -742,6 +742,52 @@ static bool test_pool_exhaustion_reported() {
     return true;
 }
 
+// ── H13：HEAD 抑制响应体、保留 Content-Length，并回退到 GET 路由 ──
+static bool test_head_semantics() {
+    TEST("H13 HEAD 无响应体但保留 Content-Length，且回退到 GET 路由");
+    Fixture f;
+    if (!f.up()) FAIL("服务器启动失败");
+
+    int s = connectTo(f.port);
+    CHECK(s >= 0, "连接失败");
+    // 只注册了 GET /small，HEAD 必须回退到它（否则 404）
+    CHECK(sendAll(s, req("HEAD", "/small")), "发送失败");
+
+    // 期望：状态行 200、Content-Length: 5、且**没有** body 字节
+    std::string buf;
+    struct timeval tv; tv.tv_sec = 3; tv.tv_usec = 0;
+    setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+    while (buf.find("\r\n\r\n") == std::string::npos) {
+        char tmp[4096];
+        ssize_t n = recv(s, tmp, sizeof(tmp), 0);
+        if (n <= 0) break;
+        buf.append(tmp, static_cast<size_t>(n));
+    }
+    auto hdrEnd = buf.find("\r\n\r\n");
+    CHECK(hdrEnd != std::string::npos, "未收到完整头部");
+    const std::string head = buf.substr(0, hdrEnd);
+    const std::string body = buf.substr(hdrEnd + 4);
+
+    std::cout << "(status='" << head.substr(0, 15) << "' 头部后字节=" << body.size() << ") ";
+
+    CHECK(head.rfind("HTTP/1.1 200", 0) == 0,
+          "HEAD 应回退到 GET 路由并返回 200, 实际: " << head.substr(0, 20));
+    CHECK(head.find("Content-Length: 5") != std::string::npos,
+          "HEAD 必须保留完整的 Content-Length, 实际头部: " << head);
+    CHECK(body.empty(), "HEAD 响应不得携带 body, 实际收到 " << body.size() << " 字节: " << body);
+
+    // 长连接上紧接着的 GET 必须正常（证明响应边界没被打乱）
+    CHECK(sendAll(s, req("GET", "/small")), "keep-alive 复用发送失败");
+    auto r2 = readResponse(s, 3000);
+    CHECK(r2.complete && r2.body == "SMALL",
+          "HEAD 之后同一连接上的 GET 响应异常: '" << r2.status << "' body=" << r2.body);
+
+    close(s);
+    f.down();
+    PASS();
+    return true;
+}
+
 int main() {
     std::cout << "=== test_http_hardening ===" << std::endl;
     ignoreSigpipeInTest();
@@ -763,6 +809,7 @@ int main() {
     run(test_slow_handler_not_killed_by_timer, "H4 慢 handler 不被误杀");
     run(test_pool_limit_configurable, "H7 内存池上限可配置");
     run(test_pool_exhaustion_reported, "H8 池耗尽显式上报");
+    run(test_head_semantics,          "H13 HEAD 语义");
 
     std::cout << std::endl
               << "结果: " << g_testsPassed << " 通过, "

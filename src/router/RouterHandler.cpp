@@ -181,6 +181,16 @@ Route* RouterHandler::findRoute(const std::string& method, const std::string& pa
             return &route;
         }
     }
+    // HEAD 请求回退到 GET handler（RFC 9110 §9.3.2）：
+    // 响应体由 HttpServer 在序列化时抑制，因此可以安全复用 GET 的实现（H13）
+    if (method == "HEAD") {
+        for (auto& route : routes_) {
+            if (route.method == "GET" &&
+                matchPath(route.pathRegex, route.paramNames, path, params)) {
+                return &route;
+            }
+        }
+    }
     return nullptr;
 }
 

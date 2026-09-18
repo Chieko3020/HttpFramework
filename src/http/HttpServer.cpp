@@ -1121,10 +1121,15 @@ void HttpServer::processHttpRequest(int subReactorIndex, net::ConnId connId,
 
         const bool keepAlive = !response->isFinalized() && request->isKeepAlive();
 
+        // HEAD 请求不得携带响应体，但必须保留 Content-Length（H13）。
+        // 抑制动作放在序列化这一层：handler 照常按 GET 语义写完整响应。
+        const bool headRequest = (request->getMethod() == HttpMethod::HEAD);
+
         // H5：worker 只把"响应字节 + 连接标识 + 复用意愿"投递到 sub reactor 的队列，
         // 不碰 HttpContext 的任何字段 —— ctx 不再有跨线程数据。
         notifyConnectionReady(subReactorIndex, connId,
-                              std::make_shared<const std::string>(response->toString()),
+                              std::make_shared<const std::string>(
+                                  response->toString(headRequest)),
                               keepAlive);
 
         stats_.completedRequests.fetch_add(1);
