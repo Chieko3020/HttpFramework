@@ -58,7 +58,9 @@ bool HttpRequest::parse(const std::string& rawRequest) {
             headerEndSepLen_ = 2;
             bodyStart = headerEnd + 2;  // 跳过 "\n\n"
         } else {
-            bodyStart = std::string::npos;
+            // 缺少头部结束空行：请求尚不完整（如 TCP 半包），不应视为解析成功——
+            // 否则调用方无法判断"需要继续读"，长连接下会反复响应同一段数据
+            return false;
         }
     }
 
@@ -261,8 +263,14 @@ void HttpRequest::setParam(const std::string& name, const std::string& value) {
 }
 
 bool HttpRequest::isKeepAlive() const {
-    std::string connection = getHeader("connection");
-    return toLowerCase(connection) == "keep-alive";
+    // 连接复用意愿按 HTTP 版本判断：
+    //   HTTP/1.1 默认长连接，仅当显式 Connection: close 时关闭
+    //   HTTP/1.0 默认短连接，需显式 Connection: keep-alive
+    //   其他/未知版本按短连接保守处理
+    const std::string connection = toLowerCase(getHeader("connection"));
+    if (version_ == "HTTP/1.1") return connection != "close";
+    if (version_ == "HTTP/1.0") return connection == "keep-alive";
+    return false;
 }
 
 size_t HttpRequest::getContentLength() const {
