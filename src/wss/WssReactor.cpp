@@ -646,7 +646,11 @@ void WssReactor::reactorLoop() {
                 if (!c->state.tls_done) {
                     int adv = advanceTlsHandshake(&st, c, threadPool_, wsRouter_, st.wake_fd, &tlsPool);
                     if (adv < 0) { closeConnection(&st, fd); continue; }
-                    if (adv == 0) { if (e & EPOLLOUT) flushOutbound(&st, c); continue; }
+                    // 握手未完成时**不能**调用 flushOutbound：它在出站队列为空时
+                    // 会把 EPOLLOUT 清掉（updateInterest(false)），ET 模式下不会自动
+                    // 重新武装 —— SSL_accept 再也拿不到可写事件，握手永久停滞（H10）。
+                    // 握手期间只允许握手驱动改兴趣位。
+                    if (adv == 0) { continue; }
                     flushOutbound(&st, c);
                 }
             }
