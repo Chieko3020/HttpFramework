@@ -68,6 +68,10 @@ public:
     void setIdleTimeout(int seconds) { idleTimeoutSec_ = seconds; }
     int idleTimeout() const { return idleTimeoutSec_; }
 
+    // 最大并发连接数（默认 10000，0 = 不限制）：超过则拒绝新连接（L7）
+    void setMaxConnections(size_t n) { maxConnections_ = n; }
+    size_t maxConnections() const { return maxConnections_; }
+
     // 空闲检查周期（秒，默认 5）：必须在 start() 之前设置。
     // 空闲超时的实际精度 = 该周期（L6）
     void setIdleCheckIntervalSec(int seconds) {
@@ -98,6 +102,12 @@ public:
         std::atomic<uint64_t> queuedTasks{0};
     };
 
+    // 统计读取口（L14）：
+    //   - 每个字段都是 atomic，读取不会与请求线程竞争，但**不保证跨字段一致**：
+    //     多个计数器是分别 load 的，读数之间可能有在途请求被计入，属正常的快照漂移；
+    //   - 需要一致口径的用例应取差值与"请求已完成"的同步点配合使用
+    //     （见 tests/test_http_hardening.cpp 的 H1/H2 用例）。
+    // App::stats() 直接转发到这里（H15）。
     const Statistics& getStatistics() const { return stats_; }
 
 private:
@@ -175,6 +185,8 @@ private:
     int idleTimeoutSec_{60};
     // 空闲检查周期（秒）
     int idleCheckIntervalSec_{5};
+    // 最大并发连接数（L7）
+    size_t maxConnections_{10000};
 
     // 单请求体上限（M3）
     size_t maxRequestBodyBytes_{64u * 1024u * 1024u};

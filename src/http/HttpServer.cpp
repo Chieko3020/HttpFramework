@@ -10,6 +10,7 @@
 #include <chrono>
 #include <sys/eventfd.h>
 #include <sys/timerfd.h>
+#include <netinet/tcp.h>
 
 namespace http {
 
@@ -555,7 +556,10 @@ void HttpServer::handleAccept() {
 
     while (true) {
         clientAddrLen = sizeof(clientAddr);
-        int clientFd = accept(listenFd_, (struct sockaddr*)&clientAddr, &clientAddrLen);
+        // accept4：一次系统调用拿到非阻塞 + CLOEXEC（L7），
+        // 旧实现是 accept + fcntl 两步，且 fcntl 失败时 fd 已经泄漏在窗口里
+        int clientFd = ::accept4(listenFd_, (struct sockaddr*)&clientAddr,
+                                 &clientAddrLen, SOCK_NONBLOCK | SOCK_CLOEXEC);
         if (clientFd < 0) {
             if (errno == EAGAIN || errno == EWOULDBLOCK) break;
             if (errno == EINTR) continue;
@@ -563,10 +567,18 @@ void HttpServer::handleAccept() {
             break;
         }
 
-        if (!setNonBlocking(clientFd)) {
-            std::cerr << "[ERROR][HTTP服务器]：设置客户端socket非阻塞失败" << std::endl;
+        // 连接数上限：超过就立刻拒绝新连接，避免 fd 耗尽把整个进程拖死（L7）
+        if (maxConnections_ > 0 &&
+            stats_.activeConnections.load() >= maxConnections_) {
+            LOG_DEBUG("HTTP服务器", "连接数达到上限, 拒绝新连接, limit=" << maxConnections_);
             close(clientFd);
             continue;
+        }
+
+        {
+            int one = 1;
+            // 小响应禁用 Nagle：与我们的"写完即 flush"模型配合可显著降低小响应延迟（L7）
+            ::setsockopt(clientFd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
         }
 
         // 轮询选择子 Reactor

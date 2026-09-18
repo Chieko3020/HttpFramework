@@ -102,16 +102,33 @@ bool HttpRequest::parse(std::string_view rawView) {
     }
 
     if (isChunked) {
-        // 结束标记必须存在（解码前的原始报文中，从头找到第一个 "0\r\n\r\n"）
-        size_t endPos = rawRequest.find("0\r\n\r\n", bodyStart);
-        if (endPos == std::string::npos) {
-            return false;  // 未收齐
+        // 逐块扫描求出 chunked 报文的真实结束偏移（L13）：
+        // 旧实现直接 find("0\r\n\r\n")，遇到 trailer（0\r\nTrailer: x\r\n\r\n）
+        // 就会找不到结束标记，把收到的请求判成"未收齐"一直挂到空闲超时；
+        // 同时它对 chunk size 的合法性（负数/超长/非十六进制）也毫无校验。
+        size_t endOff = 0;
+        ChunkScanResult scan = scanChunkedEnd(rawRequest, bodyStart, &endOff);
+        if (scan == ChunkScanResult::Malformed) {
+            malformed_ = true;
+            body_.clear();
+            bodyConsumed_ = 0;
+            return false;
         }
-        // chunked 的 body 边界跨越整个 chunked 报文（长度行 + 数据 + 终止块），
-        // 到 "0\r\n\r\n" 结束——其后的字节属于同一连接的下一个请求。
-        bodyConsumed_ = endPos + 5 - bodyStart;
+        if (scan == ChunkScanResult::TooLarge) {
+            bodyTooLarge_ = true;
+            body_.clear();
+            bodyConsumed_ = 0;
+            return false;
+        }
+        if (scan == ChunkScanResult::Incomplete) {
+            return false;  // 未收齐，等更多数据
+        }
+        // chunked 的 body 边界 = 长度行 + 数据 + 终止块 + trailer；
+        // 其后的字节属于同一连接的下一个请求。
+        bodyConsumed_ = endOff - bodyStart;
 
         if (!decodeChunkedBody()) {
+            malformed_ = true;
             return false;
         }
     } else {
@@ -176,6 +193,50 @@ bool HttpRequest::parse(std::string_view rawView) {
     return true;
 }
 
+// 扫描 chunked 报文，返回结束偏移（已收齐时）与扫描结论（L13）
+ChunkScanResult HttpRequest::scanChunkedEnd(const std::string& raw, size_t bodyStart,
+                                            size_t* endOff) {
+    size_t pos = bodyStart;
+    unsigned long long total = 0;
+
+    while (true) {
+        const size_t lineEnd = raw.find("\r\n", pos);
+        if (lineEnd == std::string::npos) return ChunkScanResult::Incomplete;
+
+        std::string sizeLine = raw.substr(pos, lineEnd - pos);
+        const size_t semi = sizeLine.find(';');
+        if (semi != std::string::npos) sizeLine = sizeLine.substr(0, semi);
+
+        // chunk size 必须是 1~16 位十六进制（不接受符号/空白/负数/超长）
+        if (sizeLine.empty() || sizeLine.size() > 16) return ChunkScanResult::Malformed;
+        for (unsigned char c : sizeLine) {
+            if (!std::isxdigit(c)) return ChunkScanResult::Malformed;
+        }
+
+        unsigned long long chunkSize = std::strtoull(sizeLine.c_str(), nullptr, 16);
+        pos = lineEnd + 2;
+
+        if (chunkSize == 0) {
+            // 终止块之后是 trailer（可能为空），逐行读到空行为止
+            while (true) {
+                const size_t tEnd = raw.find("\r\n", pos);
+                if (tEnd == std::string::npos) return ChunkScanResult::Incomplete;
+                if (tEnd == pos) {
+                    pos += 2;
+                    if (endOff) *endOff = pos;
+                    return ChunkScanResult::Complete;
+                }
+                pos = tEnd + 2;
+            }
+        }
+
+        total += chunkSize;
+        if (total > maxBodySize_) return ChunkScanResult::TooLarge;
+        if (pos + chunkSize + 2 > raw.size()) return ChunkScanResult::Incomplete;
+        pos += static_cast<size_t>(chunkSize) + 2;   // data + CRLF
+    }
+}
+
 bool HttpRequest::decodeChunkedBody() {
     std::string decoded;
     size_t pos = 0;
@@ -192,9 +253,13 @@ bool HttpRequest::decodeChunkedBody() {
             sizeStr = sizeStr.substr(0, semiPos);
         }
 
-        char* end;
-        long chunkSize = std::strtol(sizeStr.c_str(), &end, 16);
-        if (*end != '\0') return false;
+        // 与 scanChunkedEnd 一致：只接受纯十六进制、长度有界（L13）
+        if (sizeStr.empty() || sizeStr.size() > 16) return false;
+        for (unsigned char c : sizeStr) {
+            if (!std::isxdigit(c)) return false;
+        }
+        unsigned long long chunkSize = std::strtoull(sizeStr.c_str(), nullptr, 16);
+        if (chunkSize > maxBodySize_) return false;
 
         pos = lineEnd + 2;  // 跳过 \r\n
 
@@ -204,8 +269,8 @@ bool HttpRequest::decodeChunkedBody() {
 
         if (pos + chunkSize + 2 > body_.size()) return false;
 
-        decoded.append(body_.substr(pos, chunkSize));
-        pos += chunkSize + 2;  // 跳过 data + \r\n
+        decoded.append(body_.substr(pos, static_cast<size_t>(chunkSize)));
+        pos += static_cast<size_t>(chunkSize) + 2;  // 跳过 data + \r\n
     }
 
     body_ = std::move(decoded);

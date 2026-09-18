@@ -1108,6 +1108,46 @@ static bool test_malformed_request_400() {
     return true;
 }
 
+// ── L13：chunked trailer 与非法 chunk size ──
+static bool test_chunked_hardening() {
+    TEST("L13 chunked 带 trailer 能收齐；非法 chunk size 回 400");
+    Fixture f;
+    if (!f.up()) FAIL("服务器启动失败");
+
+    // trailer 场景：0\r\nTrailer: v\r\n\r\n（旧实现在这里判定"未收齐"挂到超时）
+    {
+        int s = connectTo(f.port);
+        CHECK(s >= 0, "连接失败");
+        std::string raw = "POST /echo HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\n\r\n"
+                          "4\r\nWiki\r\n5\r\npedia\r\n0\r\nX-Trailer: v\r\n\r\n";
+        CHECK(sendAll(s, raw), "发送失败");
+        auto r = readResponse(s, 4000);
+        std::cout << "(trailer→" << (r.complete ? "收齐" : "超时") << ") ";
+        CHECK(r.complete, "带 trailer 的 chunked 请求必须被收齐（不得挂到空闲超时）");
+        CHECK(r.body == "Wikipedia", "解码结果错误: '" << r.body << "'");
+        close(s);
+    }
+
+    // 非法 chunk size：负号
+    {
+        int s = connectTo(f.port);
+        CHECK(s >= 0, "连接失败");
+        std::string raw = "POST /echo HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\n\r\n"
+                          "-5\r\nAAAAA\r\n0\r\n\r\n";
+        CHECK(sendAll(s, raw), "发送失败");
+        auto r = readResponse(s, 4000);
+        std::cout << "(非法 chunk size→"
+                  << (r.status.empty() ? "无响应" : r.status.substr(9, 3)) << ") ";
+        CHECK(r.complete && r.status.rfind("HTTP/1.1 400", 0) == 0,
+              "非法 chunk size 应回 400, 实际: " << r.status);
+        close(s);
+    }
+
+    f.down();
+    PASS();
+    return true;
+}
+
 int main() {
     std::cout << "=== test_http_hardening ===" << std::endl;
     ignoreSigpipeInTest();
@@ -1137,6 +1177,7 @@ int main() {
     run(test_request_buffer_limits,   "M4 请求缓冲上限/慢速滴灌");
     run(test_header_normalization,    "M10 响应头归一化");
     run(test_malformed_request_400,   "L3 畸形请求 400");
+    run(test_chunked_hardening,       "L13 chunked 健壮性");
 
     std::cout << std::endl
               << "结果: " << g_testsPassed << " 通过, "

@@ -8,6 +8,14 @@
 
 namespace http {
 
+// chunked 报文扫描结论（L13）
+enum class ChunkScanResult {
+    Complete,    // 已收齐（含 trailer）
+    Incomplete,  // 数据还不够
+    Malformed,   // chunk size 非法（非十六进制/超 16 位）
+    TooLarge     // 累计超过 maxBodySize_
+};
+
 enum class HttpMethod {
     GET,
     POST,
@@ -150,6 +158,8 @@ private:
     
     // chunked transfer encoding 解码
     bool decodeChunkedBody();
+    // 扫描 chunked 报文边界（含 trailer 处理，L13）
+    ChunkScanResult scanChunkedEnd(const std::string& raw, size_t bodyStart, size_t* endOff);
 };
 
 } // namespace http

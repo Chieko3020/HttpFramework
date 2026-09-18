@@ -18,6 +18,7 @@
 
 #include <algorithm>
 #include <cerrno>
+#include <unordered_set>
 #include <chrono>
 #include <cstring>
 #include <deque>
@@ -172,9 +173,11 @@ class TlsReadPool {
 public:
     TlsReadPool(std::size_t blockSize, std::size_t preallocCount)
         : blockSize_(blockSize) {
+        owned_.reserve(preallocCount);
         for (std::size_t i = 0; i < preallocCount; ++i) {
             auto* block = new uint8_t[blockSize];
             owned_.push_back(block);
+            ownedSet_.insert(block);
             freeList_.push_back(block);
         }
     }
@@ -194,15 +197,19 @@ public:
     }
     void release(uint8_t* p) {
         std::lock_guard<std::mutex> lk(mu_);
-        for (auto* owned : owned_)
-            if (owned == p) { freeList_.push_back(p); return; }
-        delete[] p;
+        // 用集合做 O(1) 归属判断：旧实现每次归还要线性扫 owned_（512 项）（L7）
+        if (ownedSet_.count(p) > 0) {
+            freeList_.push_back(p);
+            return;
+        }
+        delete[] p;   // 池耗尽时的堆回退缓冲
     }
     std::size_t blockSize() const { return blockSize_; }
 
 private:
     std::size_t blockSize_;
     std::vector<uint8_t*> owned_, freeList_;
+    std::unordered_set<uint8_t*> ownedSet_;
     std::mutex mu_;
     std::atomic<uint64_t> heapFallback_{0};
 };
