@@ -260,6 +260,10 @@ struct WssFixture {
         if (reactor) reactor->stop();
         if (pool) pool->shutdown();
     }
+
+    // 析构体里先 down()：onClose 回调会触碰 opened/closed/closeCode/mu/cv，
+    // 若等成员按声明逆序析构（cv/mu 先走），关闭剩余连接时回调就会用到已析构对象
+    ~WssFixture() { down(); }
 };
 
 // ───────────────────────── 用例 ─────────────────────────

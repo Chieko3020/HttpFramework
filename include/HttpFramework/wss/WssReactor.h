@@ -33,6 +33,7 @@ struct WssReactorState {
     int epoll_fd{-1};
     int timer_fd{-1};
     int wake_fd{-1};
+    bool wake_fd_open{false};   // wake_fd 是否仍打开（保留到析构，见 WssReactor.cpp）
 
     std::unordered_map<int, std::shared_ptr<WssConnection>> conns;
     uint64_t nextConnId{1};
@@ -78,6 +79,8 @@ public:
 
 private:
     void reactorLoop();
+    // 释放 SSL_CTX 与全部 fd、关闭剩余连接（幂等；start 失败与 stop 共用）
+    void releaseResources();
 
     uint16_t port_;
     std::string certFile_;

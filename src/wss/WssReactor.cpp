@@ -39,7 +39,7 @@ WssConnection::~WssConnection() = default;
 
 uint64_t WssConnection::id() const { return state.id; }
 bool WssConnection::isOpen() const {
-    return state.tls_done && state.ws_upgraded && !state.closing && state.fd >= 0;
+    return state.tls_done && state.ws_upgraded && !state.closing && state.fd.load() >= 0;
 }
 std::string WssConnection::remoteAddr() const { return state.remoteAddr; }
 
@@ -48,7 +48,7 @@ void WssConnection::sendText(const std::string& text) {
 }
 void WssConnection::sendBinary(const std::vector<uint8_t>& data) {
     std::lock_guard<std::mutex> lk(state.outbound_mu);
-    if (state.closing || state.fd < 0 || !state.ssl) return;
+    if (state.closing || state.fd.load() < 0 || !state.ssl) return;
     WssOutboundItem item; item.data = data; item.offset = 0;
     state.outbound.push_back(std::move(item));
 }
@@ -242,7 +242,19 @@ void closeConnection(WssReactorState* st, int fd) {
         c->state.ws_upgraded = false;   // 防重入：closeConnection 可能被重复调用
     }
 
-    if (c->state.fd >= 0) { ::close(c->state.fd); c->state.fd = -1; }
+    // M16：必须先结束 TLS 会话再 close(fd)。
+    // 反过来的话，BIO 仍持有已关闭（且可能已被内核复用）的 fd 号，
+    // 析构里的 SSL_shutdown 会把 close_notify 写进一个无关的 fd。
+    if (c->state.ssl) {
+        SSL_shutdown(c->state.ssl);   // 非阻塞套接字：发出 close_notify 后立即返回
+        SSL_free(c->state.ssl);
+        c->state.ssl = nullptr;
+    }
+    int closingFd = c->state.fd.load();
+    if (closingFd >= 0) {
+        c->state.fd.store(-1);        // 先置 -1，worker 侧 isOpen() 立刻为 false
+        ::close(closingFd);
+    }
     std::cout << "[INFO][WSS]：连接关闭, fd=" << fd << " id=" << c->id()
               << " code=" << c->state.closeCode << std::endl;
 }
@@ -363,8 +375,10 @@ bool processWsInboundBuffer(WssReactorState* st, int fd,
             auto payloadCopy = frame.payload;
             auto opcode = frame.opcode;
             std::weak_ptr<WssConnection> weak = c;
-            pool.enqueue([weak, payloadCopy, opcode, wake_fd, router,
-                          epoll_fd = st->epoll_fd, metricsSt = st]() mutable {
+            // 只捕获任务真正需要的东西：wake_fd 用于唤醒 I/O 线程（见
+            // releaseResources 里"wake_fd 保留到析构"的说明），router 用于分发。
+            // 原先还捕获了未使用的 epoll_fd / metricsSt 裸指针（M17）。
+            pool.enqueue([weak, payloadCopy, opcode, wake_fd, router]() mutable {
                 auto conn = weak.lock();
                 if (!conn || !conn->isOpen()) return;
                 WsMessage msg;
@@ -466,7 +480,7 @@ int advanceTlsHandshake(WssReactorState* st, std::shared_ptr<WssConnection> c,
 
 bool flushOutbound(WssReactorState* st, std::shared_ptr<WssConnection> c) {
     auto& s = c->state;
-    if (s.fd < 0 || !s.ssl) return true;
+    if (s.fd.load() < 0 || !s.ssl) return true;
     std::unique_lock<std::mutex> lk(s.outbound_mu);
     if (s.closing && s.outbound.empty()) { updateInterest(st->epoll_fd, s.fd, false); return true; }
     if (s.outbound.empty()) { updateInterest(st->epoll_fd, s.fd, false); return true; }
@@ -485,7 +499,11 @@ bool flushOutbound(WssReactorState* st, std::shared_ptr<WssConnection> c) {
         int err = SSL_get_error(s.ssl, ret);
         if (err == SSL_ERROR_WANT_WRITE) { updateInterest(st->epoll_fd, s.fd, true); return false; }
         if (err == SSL_ERROR_WANT_READ) { updateInterest(st->epoll_fd, s.fd, false); return false; }
-        std::cerr << "[ERROR][WSS]：SSL_write致命错误, id=" << c->id() << std::endl;
+        // 致命错误（非 WANT_READ/WANT_WRITE）：不能既不弹队列也不关连接，
+        // 否则出站队列永远不再前进，连接静默挂死到空闲超时（M14）。
+        std::cerr << "[ERROR][WSS]：SSL_write致命错误, 关闭连接, id=" << c->id() << std::endl;
+        s.closing = true;
+        s.close_deadline = std::chrono::steady_clock::now() + kCloseGrace;
         return false;
     }
     updateInterest(st->epoll_fd, s.fd, false);
@@ -501,8 +519,6 @@ bool flushOutbound(WssReactorState* st, std::shared_ptr<WssConnection> c) {
 WssReactor::WssReactor(uint16_t port, const std::string& certFile,
                        const std::string& keyFile, utils::ThreadPool& threadPool)
     : port_(port), certFile_(certFile), keyFile_(keyFile), threadPool_(threadPool) {}
-
-WssReactor::~WssReactor() { stop(); }
 
 void WssReactor::setWsRouter(std::shared_ptr<WsRouter> router) {
     wsRouter_ = std::move(router);
@@ -563,14 +579,42 @@ bool WssReactor::start() {
                   << "s ping=" << st.pingIntervalSec << "s" << std::endl;
         return true;
     } catch (const std::exception& ex) {
-        std::cerr << "[ERROR][WSS]：服务启动失败: " << ex.what() << std::endl;
+        // M14：启动失败必须把已分配的资源全部回滚，否则坏证书/端口占用的每次重试
+        // 都会泄漏一个 SSL_CTX 与若干 fd
+        std::cerr << "[ERROR][WSS]：服务启动失败: " << ex.what()
+                  << "（回滚已分配资源）" << std::endl;
+        releaseResources();
         return false;
     }
 }
 
+// 释放 reactor 持有的 SSL_CTX 与全部 fd（幂等，start 失败与 stop 都走这里）
+void WssReactor::releaseResources() {
+    if (reactorThread_.joinable()) {
+        running_.store(false);
+        reactorThread_.join();
+    }
+    // 循环里未收尾的连接在此统一关闭（含 TLS 收尾与 onClose 回调）
+    while (!st.conns.empty()) {
+        wss::closeConnection(&st, st.conns.begin()->first);
+    }
+    if (st.ctx) { SSL_CTX_free(st.ctx); st.ctx = nullptr; }
+    if (st.listen_fd >= 0) { ::close(st.listen_fd); st.listen_fd = -1; }
+    if (st.epoll_fd >= 0) { ::close(st.epoll_fd); st.epoll_fd = -1; }
+    if (st.timer_fd >= 0) { ::close(st.timer_fd); st.timer_fd = -1; }
+    // wake_fd 故意保留到对象析构（M17）：在途 worker 任务可能仍持有这个 fd 号并写入，
+    // 只要它一直打开，那一笔写就落在自己的 eventfd 上，而不会落到被复用的无关 fd。
+    st.wake_fd_open = (st.wake_fd >= 0);
+}
+
 void WssReactor::stop() {
     running_.store(false);
-    if (reactorThread_.joinable()) reactorThread_.join();
+    releaseResources();
+}
+
+WssReactor::~WssReactor() {
+    // 基类析构里 stop() 已经跑过；这里只收尾 wake_fd（见 releaseResources 的说明）
+    if (st.wake_fd >= 0) { ::close(st.wake_fd); st.wake_fd = -1; }
 }
 
 void WssReactor::reactorLoop() {
@@ -743,11 +787,9 @@ void WssReactor::reactorLoop() {
         }
     }
 
-    if (st.ctx) { SSL_CTX_free(st.ctx); st.ctx = nullptr; }
-    if (st.listen_fd >= 0) { ::close(st.listen_fd); st.listen_fd = -1; }
-    if (st.epoll_fd >= 0) { ::close(st.epoll_fd); st.epoll_fd = -1; }
-    if (st.timer_fd >= 0) { ::close(st.timer_fd); st.timer_fd = -1; }
-    if (st.wake_fd >= 0) { ::close(st.wake_fd); st.wake_fd = -1; }
+    // 资源的释放统一由 releaseResources() 负责（幂等、start 失败与 stop 共用）。
+    // 这里只负责退出循环 —— 在途 worker 仍可能写 wake_fd，它必须保持打开（M17）。
+    std::cout << "[INFO][WSS]：reactor 循环结束" << std::endl;
 }
 
 }  // namespace wss

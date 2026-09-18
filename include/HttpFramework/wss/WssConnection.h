@@ -30,7 +30,9 @@ struct WssOutboundItem {
 };
 
 struct WssConnectionState {
-    int fd{-1};
+    // fd 会被 I/O 线程写（accept、断开时置 -1）、被 worker 线程读（isOpen），
+    // 因此必须是原子的（M15）。ssl 指针的生命周期由关闭顺序保证（M16）。
+    std::atomic<int> fd{-1};
     SSL* ssl{nullptr};
     uint64_t id{0};
     bool tls_done{false};
@@ -63,9 +65,12 @@ struct WssConnectionState {
           last_ping(std::chrono::steady_clock::now()),
           last_server_ping_sent(std::chrono::steady_clock::now()) {}
 
+    // 兜底析构：正常路径下 closeConnection 已经做过 SSL_shutdown/SSL_free/::close
+    // （见 M16），这里只处理"连接对象一直被 worker 持有、直到 reactor 销毁"的收尾。
     ~WssConnectionState() {
         if (ssl) { SSL_shutdown(ssl); SSL_free(ssl); ssl = nullptr; }
-        if (fd >= 0) { ::close(fd); fd = -1; }
+        int f = fd.load();
+        if (f >= 0) { ::close(f); fd.store(-1); }
     }
 };
 
