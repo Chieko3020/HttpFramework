@@ -1,6 +1,7 @@
 #include "http/HttpServer.h"
 #include "router/Router.h"
 #include "router/RouterHandler.h"
+#include "utils/Logger.h"
 
 #include <algorithm>
 #include <iostream>
@@ -278,7 +279,7 @@ bool HttpServer::initializeServer() {
 
     // 初始化主 epoll（仅监听 listenFd_）
     if (!setupMainEpoll()) {
-        close(listenFd_);
+        releaseFds();   // 统一回收（含 listenFd_），不留下半初始化状态（M5）
         return false;
     }
 
@@ -288,7 +289,7 @@ bool HttpServer::initializeServer() {
         auto sr = std::make_unique<SubReactor>();
         subReactors_.push_back(std::move(sr));
         if (!setupSubReactor(i)) {
-            close(listenFd_);
+            releaseFds();   // 已建好的子 Reactor epoll/wake/timer fd 全部回收（M5）
             return false;
         }
     }
@@ -617,9 +618,13 @@ void HttpServer::handleAccept() {
 
         stats_.activeConnections.fetch_add(1);
 
-        std::cout << "[INFO][HTTP服务器]：新连接, from=" << inet_ntoa(clientAddr.sin_addr)
-                  << ":" << ntohs(clientAddr.sin_port) << " (fd: " << clientFd
-                  << ", reactor: " << idx << ")" << std::endl;
+        // M7：每连接两条日志走 Logger 的 Debug 级别（默认 Info 级别下完全不格式化、
+        // 不落盘），热路径默认安静。
+        if (Logger::isEnabled(LogLevel::Debug)) {
+            LOG_DEBUG("HTTP服务器", "新连接 from=" << inet_ntoa(clientAddr.sin_addr)
+                      << ":" << ntohs(clientAddr.sin_port) << " (fd: " << clientFd
+                      << ", reactor: " << idx << ")");
+        }
     }
 }
 
@@ -666,6 +671,24 @@ void HttpServer::subReactorLoop(int index) {
             }
 
             if (ev & (EPOLLERR | EPOLLHUP)) {
+                // M6：不能"看到 HUP 就关" —— 客户端 shutdown(SHUT_WR) 后仍在等响应，
+                // 直接关闭会丢掉已到达的请求/未发出的响应。先把可读数据读尽再判断。
+                if (ev & EPOLLERR) {
+                    int soerr = 0;
+                    socklen_t slen = sizeof(soerr);
+                    if (getsockopt(fd, SOL_SOCKET, SO_ERROR, &soerr, &slen) == 0 && soerr != 0) {
+                        LOG_DEBUG("HTTP", "socket 错误 fd=" << fd << ": " << strerror(soerr));
+                    }
+                }
+                if (ev & EPOLLIN) handleRead(fd, index, connId);
+
+                // 读尽之后：若该连接上还有在途请求或待发响应，交给写路径收尾
+                // （响应写完后由 keep-alive 分支重新武装 EPOLLIN，下一次读到 EOF 再关闭）
+                HttpContext* hctx = lookupContext(index, fd);
+                if (hctx &&
+                    (hctx->inFlightCount() > 0 || hctx->hasCurrentResponse())) {
+                    continue;
+                }
                 closeConnection(fd, index);
             } else {
                 if (ev & EPOLLIN)  handleRead(fd, index, connId);
@@ -1112,8 +1135,9 @@ void HttpServer::closeConnectionId(net::ConnId connId) {
 
     stats_.activeConnections.fetch_sub(1);
 
-    std::cout << "[INFO][HTTP服务器]：连接关闭, fd=" << fd
-              << ", reactor: " << subReactorIndex << ")" << std::endl;
+    if (Logger::isEnabled(LogLevel::Debug)) {
+        LOG_DEBUG("HTTP服务器", "连接关闭 fd=" << fd << ", reactor: " << subReactorIndex);
+    }
 }
 
 // ---- 业务处理（线程池中执行） ----
