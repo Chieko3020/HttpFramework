@@ -68,6 +68,13 @@ public:
     void setIdleTimeout(int seconds) { idleTimeoutSec_ = seconds; }
     int idleTimeout() const { return idleTimeoutSec_; }
 
+    // 空闲检查周期（秒，默认 5）：必须在 start() 之前设置。
+    // 空闲超时的实际精度 = 该周期（L6）
+    void setIdleCheckIntervalSec(int seconds) {
+        idleCheckIntervalSec_ = seconds > 0 ? seconds : 5;
+    }
+    int idleCheckIntervalSec() const { return idleCheckIntervalSec_; }
+
     // 单请求体上限（字节，默认 64MB）：超过时回 413 而不是让服务端无限等待（M3）
     void setMaxRequestBodyBytes(size_t bytes) {
         maxRequestBodyBytes_ = bytes > 0 ? bytes : 1;
@@ -166,6 +173,8 @@ private:
 
     // 空闲连接超时（秒）
     int idleTimeoutSec_{60};
+    // 空闲检查周期（秒）
+    int idleCheckIntervalSec_{5};
 
     // 单请求体上限（M3）
     size_t maxRequestBodyBytes_{64u * 1024u * 1024u};
@@ -224,8 +233,6 @@ private:
     void unregisterEventFd(int fd);
     // 该连接标识是否仍归本 reactor 所有（陈旧回调返回 false）
     bool ownsConnection(int fd, int subReactorIndex, net::ConnId connId) const;
-    // 该 fd 上是否已存在一个"别的"连接（用于区分陈旧 fd 与自由 fd）
-    bool fdTakenByOther(int fd, int subReactorIndex) const;
     // 把 fd 从本 reactor 的待发送队列中移除（连接关闭 / fd 被新连接复用）
     void dropPendingResponses(int subReactorIndex, int fd);
     // 按 (fd, 代际) 增减该连接的在途请求计数（H4）
@@ -241,8 +248,9 @@ private:
     void writeCurrentResponse(int clientFd, int subReactorIndex, HttpContext* ctx);
 
     // ---- I/O 辅助 ----
-    // 把 socket 上可读的数据直接读进连接的请求缓冲（不再经一个临时 std::string，M1）
-    size_t readAllData(int clientFd, HttpContext* ctx);
+    // 把 socket 上可读的数据直接读进连接的请求缓冲（不再经一个临时 std::string，M1）。
+    // peerClosed 明确区分"对端关闭/致命错误"与"暂无数据"（L4）
+    size_t readAllData(int clientFd, HttpContext* ctx, bool* peerClosed = nullptr);
     bool writeAllDataFromOffset(int fd, const std::string& data, size_t offset,
                                 size_t* bytesWritten = nullptr);
 };

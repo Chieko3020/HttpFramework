@@ -365,8 +365,10 @@ bool HttpServer::setupSubReactor(size_t index) {
     }
 
     struct itimerspec its{};
-    its.it_interval.tv_sec = 5;   // 每 5s 检查一次空闲连接
-    its.it_value.tv_sec = 5;
+    // 空闲检查周期：可配置（测试需要更细的粒度来构造确定性的超时时序）（L6）
+    const int checkSec = idleCheckIntervalSec_ > 0 ? idleCheckIntervalSec_ : 5;
+    its.it_interval.tv_sec = checkSec;
+    its.it_value.tv_sec = checkSec;
     if (timerfd_settime(sr->timerFd, 0, &its, nullptr) < 0) {
         std::cerr << "[ERROR][HTTP服务器]：设置 timerfd 失败, index=" << index
                   << ": " << strerror(errno) << std::endl;
@@ -470,15 +472,6 @@ bool HttpServer::ownsConnection(int fd, int subReactorIndex, net::ConnId connId)
     }
     return it->second.generation != 0 &&
            it->second.generation == net::connIdGeneration(connId);
-}
-
-bool HttpServer::fdTakenByOther(int fd, int subReactorIndex) const {
-    std::lock_guard<std::mutex> lock(connMutex_);
-    auto it = conns_.find(fd);
-    if (it == conns_.end()) {
-        return false;
-    }
-    return it->second.owner >= 0 && it->second.owner != subReactorIndex;
 }
 
 void HttpServer::dropPendingResponses(int subReactorIndex, int fd) {
@@ -706,7 +699,11 @@ void HttpServer::rearmRead(int clientFd, int subReactorIndex, net::ConnId connId
     struct epoll_event event;
     event.events = kConnReadEvents;
     event.data.u64 = connId;
-    epoll_ctl(sr->epollFd, EPOLL_CTL_MOD, clientFd, &event);
+    if (epoll_ctl(sr->epollFd, EPOLL_CTL_MOD, clientFd, &event) < 0 && errno != ENOENT) {
+        // 忽略返回值会让 EEXIST/ENOENT/EBADF 全部不可见，排障只能靠猜（L5）
+        LOG_DEBUG("HTTP服务器", "epoll MOD(READ) 失败 fd=" << clientFd << ": "
+                  << strerror(errno));
+    }
 }
 
 void HttpServer::handleRead(int clientFd, int subReactorIndex, net::ConnId connId) {
@@ -728,14 +725,14 @@ void HttpServer::handleRead(int clientFd, int subReactorIndex, net::ConnId connI
         return;
     }
 
-    const size_t totalRead = readAllData(clientFd, ctxPtr);
+    bool peerClosed = false;
+    const size_t totalRead = readAllData(clientFd, ctxPtr, &peerClosed);
 
     if (totalRead == 0) {
-        // 未读到任何字节：对端已关闭（EOF）或事件已被取走（EAGAIN）。
-        // 用 recv 的返回语义区分，避免把"暂无数据"误判为连接终止。
-        char probe = 0;
-        ssize_t n = ::recv(clientFd, &probe, 1, 0);
-        if (n == 0) {
+        // 未读到任何字节：由 readAllData 用 recv 的返回语义区分
+        // "对端已关闭（EOF/致命错误）"与"暂无数据（EAGAIN）"（L4）。
+        // 旧实现用一次额外的探测 recv 来猜，语义上更脆。
+        if (peerClosed) {
             closeConnection(clientFd, subReactorIndex);
         } else {
             rearmRead(clientFd, subReactorIndex, connId);
@@ -833,6 +830,16 @@ void HttpServer::dispatchBufferedRequests(int clientFd, int subReactorIndex,
             response->setJson(tooLarge
                                   ? R"({"error":"Request body too large"})"
                                   : R"({"error":"Conflicting Content-Length and Transfer-Encoding"})");
+            response->setHeader("Connection", "close");
+            response->markFinalized();
+            enqueueRequestTask(subReactorIndex, clientFd, connId, request, response);
+            return;
+        }
+        if (request->isMalformed()) {
+            // 语法畸形的请求永远是畸形的：明确 400 并关闭连接（L3）
+            auto response = std::make_shared<HttpResponse>();
+            response->setStatus(HttpStatus::BAD_REQUEST);
+            response->setJson(R"({"error":"Malformed request"})");
             response->setHeader("Connection", "close");
             response->markFinalized();
             enqueueRequestTask(subReactorIndex, clientFd, connId, request, response);
@@ -978,7 +985,9 @@ void HttpServer::handleTimer(int subReactorIndex) {
     // 消费到期计数（timerfd 必须读取，否则会持续触发）
     uint64_t expirations = 0;
     ssize_t n = read(sr->timerFd, &expirations, sizeof(expirations));
-    (void)n;
+    if (n != static_cast<ssize_t>(sizeof(expirations))) {
+        LOG_DEBUG("HTTP服务器", "timerfd 读取异常: n=" << n << " errno=" << strerror(errno));
+    }
 
     if (idleTimeoutSec_ <= 0) return;
 
@@ -1133,7 +1142,10 @@ void HttpServer::writeCurrentResponse(int clientFd, int subReactorIndex, HttpCon
         struct epoll_event event;
         event.events = kConnWriteEvents;
         event.data.u64 = net::makeConnId(clientFd, ctxPtr->connectionGeneration());
-        epoll_ctl(sr->epollFd, EPOLL_CTL_MOD, clientFd, &event);
+        if (epoll_ctl(sr->epollFd, EPOLL_CTL_MOD, clientFd, &event) < 0 && errno != ENOENT) {
+            LOG_DEBUG("HTTP服务器", "epoll MOD(WRITE) 失败 fd=" << clientFd << ": "
+                      << strerror(errno));
+        }
     }
 }
 
@@ -1173,7 +1185,10 @@ void HttpServer::closeConnectionId(net::ConnId connId) {
 
     auto& sr = subReactors_[subReactorIndex];
 
-    epoll_ctl(sr->epollFd, EPOLL_CTL_DEL, fd, nullptr);
+    if (epoll_ctl(sr->epollFd, EPOLL_CTL_DEL, fd, nullptr) < 0 && errno != ENOENT &&
+        errno != EBADF) {
+        LOG_DEBUG("HTTP服务器", "epoll DEL 失败 fd=" << fd << ": " << strerror(errno));
+    }
 
     {
         std::lock_guard<std::mutex> lock(sr->contextsMutex);
@@ -1249,22 +1264,27 @@ void HttpServer::processHttpRequest(int subReactorIndex, net::ConnId connId,
 
 // ---- I/O 辅助 ----
 
-// 直接把数据读进连接的请求缓冲：省掉"临时 std::string + appendData 拷贝"两份拷贝中的一份（M1）
-size_t HttpServer::readAllData(int fd, HttpContext* ctx) {
+// 直接把数据读进连接的请求缓冲：省掉"临时 std::string + appendData 拷贝"两份拷贝中的一份（M1）。
+// 用 recv 而不是 read，并把"对端已关闭 / 读致命错误"通过 peerClosed 明确报给调用方（L4）：
+// recv()==0 才是 EOF，<0 且 EAGAIN/EWOULDBLOCK 是"暂无数据"，其余错误按致命处理。
+size_t HttpServer::readAllData(int fd, HttpContext* ctx, bool* peerClosed) {
     char buffer[4096];
     size_t readBytes = 0;
+    if (peerClosed) *peerClosed = false;
 
     while (true) {
-        ssize_t n = read(fd, buffer, sizeof(buffer));
+        ssize_t n = ::recv(fd, buffer, sizeof(buffer), 0);
         if (n > 0) {
             ctx->appendData(buffer, static_cast<size_t>(n));
             readBytes += static_cast<size_t>(n);
         } else if (n == 0) {
+            if (peerClosed) *peerClosed = true;   // 对端关闭写方向
             break;
         } else {
             if (errno == EAGAIN || errno == EWOULDBLOCK) break;
             if (errno == EINTR) continue;
             std::cerr << "[ERROR][HTTP服务器]：读取错误: " << strerror(errno) << std::endl;
+            if (peerClosed) *peerClosed = true;
             break;
         }
     }

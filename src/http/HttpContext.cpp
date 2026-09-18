@@ -8,24 +8,7 @@ HttpContext::HttpContext()
       memoryPool_(nullptr), writeOffset_(0) {
 }
 
-void HttpContext::setUserData(const std::string& key, const std::string& value) {
-    userData_[key] = value;
-}
-
-const std::string& HttpContext::getUserData(const std::string& key) const {
-    static const std::string empty;
-    auto it = userData_.find(key);
-    return (it != userData_.end()) ? it->second : empty;
-}
-
-bool HttpContext::hasUserData(const std::string& key) const {
-    return userData_.find(key) != userData_.end();
-}
-
 void HttpContext::clear() {
-    request_ = HttpRequest();
-    response_ = HttpResponse();
-    userData_.clear();
     clientFd_ = -1;
     keepAlive_ = false;
     
@@ -48,10 +31,6 @@ void HttpContext::clear() {
 
 void HttpContext::resetForNextRequest() {
     // 注意：不清空请求缓冲——其中可能还有同一连接的下一个请求字节
-    request_ = HttpRequest();
-    response_ = HttpResponse();
-    userData_.clear();
-
     writeOffset_ = 0;
     truncated_ = false;
     allocationFailed_ = false;
@@ -135,17 +114,6 @@ size_t HttpContext::requestBufferCapacity() const {
     return 0;
 }
 
-void HttpContext::clearData() {
-    if (useMemoryPool_) {
-        if (requestBuffer_) {
-            requestBuffer_->clear();
-        }
-    } else {
-        buffer_.clear();
-    }
-    readPos_ = 0;
-}
-
 void HttpContext::consumeData(size_t n) {
     // 只推进读游标（零拷贝）；缓冲区的物理回收推迟到下一次 appendData（M1）
     const size_t size = dataSize();
@@ -190,19 +158,6 @@ void HttpContext::enableMemoryPool(bool enable, utils::HttpMemoryPool* pool) {
             buffer_ = requestBuffer_->readString(requestBuffer_->getUsedSize());
             requestBuffer_.reset();
         }
-    }
-}
-
-void HttpContext::printMemoryPoolStats() const {
-    std::cout << "HttpContext Memory Pool Stats:" << std::endl;
-    std::cout << "  Memory Pool Enabled: " << (useMemoryPool_ ? "Yes" : "No") << std::endl;
-    std::cout << "  Request Buffer Size: " << (useMemoryPool_ && requestBuffer_ ? 
-        requestBuffer_->getUsedSize() : buffer_.size()) << " bytes" << std::endl;
-    
-    if (useMemoryPool_) {
-        std::cout << "  Pool Total Blocks: " << memoryPool_->getTotalBlocks() << std::endl;
-        std::cout << "  Pool Used Blocks: " << memoryPool_->getUsedBlocks() << std::endl;
-        std::cout << "  Pool Available Blocks: " << memoryPool_->getAvailableBlocks() << std::endl;
     }
 }
 

@@ -52,9 +52,13 @@ void ThreadPool::workerFunction() {
                 std::cerr << "[ERROR][线程池]：任务执行异常: " << e.what() << std::endl;
             }
             
-            // 任务完成，减少活跃任务计数
+            // 任务完成，减少活跃任务计数。
+            // 归零时必须在持 queueMutex_ 的情况下通知：waitForAllTasks 的谓词
+            // 也是在持锁状态下求值的，否则通知可能落在"谓词检查完、进入等待前"
+            // 的窗口里，等待方永久阻塞（丢失唤醒）（L2）。
             size_t remaining = activeTasks_.fetch_sub(1) - 1;
             if (remaining == 0) {
+                std::unique_lock<std::mutex> lock(queueMutex_);
                 finishedCondition_.notify_all();
             }
         }

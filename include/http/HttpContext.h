@@ -17,19 +17,6 @@ public:
     HttpContext();
     ~HttpContext() = default;
     
-    // 获取请求对象
-    HttpRequest& getRequest() { return request_; }
-    const HttpRequest& getRequest() const { return request_; }
-    
-    // 获取响应对象
-    HttpResponse& getResponse() { return response_; }
-    const HttpResponse& getResponse() const { return response_; }
-    
-    // 设置和获取用户数据
-    void setUserData(const std::string& key, const std::string& value);
-    const std::string& getUserData(const std::string& key) const;
-    bool hasUserData(const std::string& key) const;
-    
     // 清空上下文并重置连接状态（连接关闭时使用）
     void clear();
 
@@ -60,7 +47,6 @@ public:
     std::string_view peekData() const;
     size_t dataSize() const { return peekData().size(); }
     std::string getData() const;      // 兼容接口：返回整块拷贝
-    void clearData();
     void consumeData(size_t n);  // 只消费前 n 字节，保留剩余数据
 
     // 半包请求的起始时刻（用于把"慢速滴灌"与"空闲连接"区分开，M4）
@@ -77,9 +63,6 @@ public:
     // HttpServer 启用内存池时会传入自己持有的池实例，使块容量可配置（H7）
     void enableMemoryPool(bool enable = true, utils::HttpMemoryPool* pool = nullptr);
     bool isMemoryPoolEnabled() const { return useMemoryPool_; }
-    
-    // 获取内存池统计信息
-    void printMemoryPoolStats() const;
     
     // 写入进度管理
     void resetWriteOffset() { writeOffset_ = 0; }
@@ -128,9 +111,9 @@ public:
     void clearCurrentResponse() { currentResponse_.reset(); }
 
 private:
-    HttpRequest request_;
-    HttpResponse response_;
-    std::unordered_map<std::string, std::string> userData_;
+    // 说明：这里曾经保存 request_/response_/userData_，但全仓没有任何读取点
+    // （每个请求的 HttpRequest/HttpResponse 都在 HttpServer 里单独构造）。
+    // 它们每次请求被重新赋值却从不被读 —— 已删除（L1）。
     int clientFd_;
     bool keepAlive_;
     

@@ -22,6 +22,7 @@ bool HttpRequest::parse(std::string_view rawView) {
     rawBodySize_ = 0;
     conflictingFraming_ = false;
     bodyTooLarge_ = false;
+    malformed_ = false;
     
     std::istringstream stream(rawRequest);
     std::string line;
@@ -42,10 +43,14 @@ bool HttpRequest::parse(std::string_view rawView) {
     
     // 解析头部
     std::vector<std::string> headerLines;
-    while (std::getline(stream, line) && !line.empty()) {
+    while (std::getline(stream, line)) {
+        // 先剥 '\r' 再判空：请求头以 "\r\n\r\n" 结尾时，剥掉 '\r' 后会得到
+        // 一个空串——旧代码先判空后剥 '\r'，于是这个空串被当成"没有冒号的头部行"
+        // 压进列表（L3 里提到的同一个坑）
         if (!line.empty() && line.back() == '\r') {
             line.pop_back();
         }
+        if (line.empty()) break;
         headerLines.push_back(line);
     }
     
@@ -212,6 +217,17 @@ bool HttpRequest::parseRequestLine(const std::string& line) {
     std::string method, path, version;
     
     if (!(stream >> method >> path >> version)) {
+        malformed_ = true;   // 请求行缺字段：永远不会变合法（L3）
+        return false;
+    }
+
+    // 版本必须是 RFC 9110 规定的 "HTTP/" DIGIT "." DIGIT（L3）
+    const bool versionOk =
+        version.size() == 8 && version.rfind("HTTP/", 0) == 0 &&
+        std::isdigit(static_cast<unsigned char>(version[5])) && version[6] == '.' &&
+        std::isdigit(static_cast<unsigned char>(version[7]));
+    if (!versionOk) {
+        malformed_ = true;
         return false;
     }
     
@@ -239,7 +255,10 @@ bool HttpRequest::parseHeaders(const std::vector<std::string>& headerLines) {
     for (const auto& line : headerLines) {
         size_t colonPos = line.find(':');
         if (colonPos == std::string::npos) {
-            continue;
+            // 头部行没有冒号：显式判为畸形（旧实现静默跳过，
+            // 于是畸形请求被当成正常请求处理）（L3）
+            malformed_ = true;
+            return false;
         }
         
         std::string name = line.substr(0, colonPos);
@@ -247,6 +266,10 @@ bool HttpRequest::parseHeaders(const std::vector<std::string>& headerLines) {
         
         // 去除前后空格
         name.erase(0, name.find_first_not_of(" \t"));
+        if (name.empty()) {
+            malformed_ = true;
+            return false;
+        }
         name.erase(name.find_last_not_of(" \t") + 1);
         value.erase(0, value.find_first_not_of(" \t"));
         value.erase(value.find_last_not_of(" \t") + 1);

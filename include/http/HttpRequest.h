@@ -75,6 +75,11 @@ public:
     // 按 RFC 9112 §6.1 必须拒绝，否则两端对报文边界的理解可能不一致 → 请求走私面（M3）
     bool hasConflictingFraming() const { return conflictingFraming_; }
 
+    // 请求语法畸形（请求行缺字段/版本非法、头部行没有冒号等）：
+    // 这类请求"永远不会变得合法"，必须显式回 400，而不是被当成"还没收齐"
+    // 一直等到空闲超时（L3）
+    bool isMalformed() const { return malformed_; }
+
     // 请求体上限（可由 HttpServer 配置）：超过则视为不可接受（回 413 而不是当作 0 处理）
     void setMaxBodySize(size_t maxBytes) { maxBodySize_ = maxBytes; }
     size_t getMaxBodySize() const { return maxBodySize_; }
@@ -117,6 +122,7 @@ private:
     size_t contentLength_ = 0;    // 解析后的 Content-Length
     bool contentLengthValid_ = true;  // Content-Length 语法是否合法
     bool conflictingFraming_ = false; // CL 与 TE 同时存在
+    bool malformed_ = false;          // 语法畸形（L3）
     bool bodyTooLarge_ = false;       // 超过 maxBodySize_
     size_t maxBodySize_ = 64u * 1024u * 1024u;  // 默认 64MB 上限（M3）
     

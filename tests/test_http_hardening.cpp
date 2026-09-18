@@ -1028,7 +1028,9 @@ static bool test_request_buffer_limits() {
     {
         int s = connectTo(f.port);
         CHECK(s >= 0, "连接失败");
-        CHECK(sendAll(s, "GET /small HTTP/1.1\r\n"), "发送首段失败");
+        // 注意：滴灌的是**头部的值**，不能是"缺冒号的头部行"——
+        // 那属于畸形请求（L3），会被立刻 400 而不是走空闲超时路径
+        CHECK(sendAll(s, "GET /small HTTP/1.1\r\nX-Pad: "), "发送首段失败");
         const auto t0 = std::chrono::steady_clock::now();
         bool closed = false;
         while (std::chrono::duration_cast<std::chrono::seconds>(
@@ -1069,6 +1071,43 @@ static bool test_header_normalization() {
     return true;
 }
 
+// ── L3：畸形请求必须立刻 400，而不是等到空闲超时 ──
+static bool test_malformed_request_400() {
+    TEST("L3 缺冒号的头部行 / 非法版本 → 400（不再静默当成未收齐）");
+    Fixture f;
+    if (!f.up()) FAIL("服务器启动失败");
+
+    struct Case { const char* name; std::string raw; };
+    std::vector<Case> cases = {
+        {"头部行缺冒号", "GET /small HTTP/1.1\r\nHost: localhost\r\nBadHeaderLine\r\n\r\n"},
+        {"非法版本", "GET /small HTTP/9\r\nHost: localhost\r\n\r\n"},
+    };
+
+    for (auto& cse : cases) {
+        int s = connectTo(f.port);
+        CHECK(s >= 0, "连接失败");
+        CHECK(sendAll(s, cse.raw), "发送失败");
+        auto r = readResponse(s, 3000);
+        std::cout << "(" << cse.name << "→"
+                  << (r.status.empty() ? "无响应" : r.status.substr(9, 3)) << ") ";
+        CHECK(r.complete, cse.name << "：应立刻得到响应而不是挂到超时");
+        CHECK(r.status.rfind("HTTP/1.1 400", 0) == 0,
+              cse.name << " 应回 400, 实际: " << r.status);
+        close(s);
+    }
+
+    // 正常请求不能被误判
+    int s = connectTo(f.port);
+    CHECK(sendAll(s, req("GET", "/small")), "发送失败");
+    auto r = readResponse(s, 3000);
+    CHECK(r.complete && r.body == "SMALL", "正常请求被误判为畸形: " << r.status);
+    close(s);
+
+    f.down();
+    PASS();
+    return true;
+}
+
 int main() {
     std::cout << "=== test_http_hardening ===" << std::endl;
     ignoreSigpipeInTest();
@@ -1097,6 +1136,7 @@ int main() {
     run(test_reason_phrase_and_url_decode, "M9/M11 原因短语与解码");
     run(test_request_buffer_limits,   "M4 请求缓冲上限/慢速滴灌");
     run(test_header_normalization,    "M10 响应头归一化");
+    run(test_malformed_request_400,   "L3 畸形请求 400");
 
     std::cout << std::endl
               << "结果: " << g_testsPassed << " 通过, "
