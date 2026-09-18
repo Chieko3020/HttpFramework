@@ -1,5 +1,6 @@
 #pragma once
 
+#include <atomic>
 #include <chrono>
 #include <memory>
 #include <string>
@@ -80,6 +81,30 @@ public:
     void setConnectionGeneration(uint32_t generation) { connectionGeneration_ = generation; }
     uint32_t connectionGeneration() const { return connectionGeneration_; }
 
+    // ── 与业务线程之间的响应发布协议 ──
+    // 响应由 worker 线程生成、由 I/O 线程读取/发送。裸读 std::string 与 worker 的
+    // setResponseData() 构成数据竞争（可表现为 I/O 线程读到"暂时为空"的响应，
+    // 从而既不发响应也不重新武装 EPOLLIN，请求永久丢失）。这里用
+    // shared_ptr + atomic release/acquire 建立 happens-before：
+    //   worker：setResponseData(...) → publishResponse(shared_ptr)（release）
+    //   I/O   ：hasPendingResponse()（acquire）→ getResponseData()
+    // I/O 线程读过一次后必须调用 releasePendingResponse()，否则会重复发送。
+    void publishResponse(std::shared_ptr<const std::string> data) {
+        pendingResponse_ = std::move(data);
+        pendingResponseReady_.store(true, std::memory_order_release);
+    }
+    bool hasPendingResponse() const {
+        return pendingResponseReady_.load(std::memory_order_acquire);
+    }
+    std::shared_ptr<const std::string> takePendingResponse() {
+        pendingResponseReady_.store(false, std::memory_order_release);
+        return pendingResponse_;
+    }
+    void dropPendingResponse() {
+        pendingResponseReady_.store(false, std::memory_order_release);
+        pendingResponse_.reset();
+    }
+
 private:
     HttpRequest request_;
     HttpResponse response_;
@@ -105,6 +130,10 @@ private:
 
     // 连接代际（同一 fd 号复用后的归属校验）
     uint32_t connectionGeneration_ = 0;
+
+    // 响应发布协议（见头文件上半部分说明）
+    std::shared_ptr<const std::string> pendingResponse_;
+    std::atomic<bool> pendingResponseReady_{false};
 
     // 最近一次 I/O 活跃时间（空闲超时清理用）
     std::chrono::steady_clock::time_point lastActive_{std::chrono::steady_clock::now()};

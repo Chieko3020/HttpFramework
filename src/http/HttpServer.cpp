@@ -664,8 +664,10 @@ void HttpServer::dispatchBufferedRequests(int clientFd, int subReactorIndex,
         return;
     }
 
-    // 同一连接一次只处理一个请求：响应发完后再解析下一个，保证 pipelining 的响应顺序
-    if (!ctxPtr->getResponseData().empty()) return;
+    // 同一连接一次只处理一个请求：响应发完后再解析下一个，保证 pipelining 的响应顺序。
+    // 这里必须查原子发布标志而不是裸读 responseData_——后者与 worker 的
+    // setResponseData() 是数据竞争，可能读到"暂时为空"而把这个请求静默丢掉。
+    if (ctxPtr->hasPendingResponse()) return;
 
     auto request = std::make_shared<HttpRequest>();
     const std::string buffered = ctxPtr->getData();
@@ -797,9 +799,8 @@ void HttpServer::handleWrite(int clientFd, int subReactorIndex) {
         return;
     }
 
-    std::string responseData = ctxPtr->getResponseData();
-    if (responseData.empty()) {
-        // 唤醒到达但响应区还是空的：worker 尚未把响应落盘。
+    if (!ctxPtr->hasPendingResponse()) {
+        // 唤醒到达但响应还没发布：worker 尚未把响应落盘。
         // 此时绝不能就这么返回——该连接在这次唤醒前刚被 EPOLL_CTL_MOD 消费掉
         // oneshot 状态，不重新武装就再也收不到事件（响应会永久丢失）。
         // 这里补一次 EPOLLIN，让唤醒路径自我纠错。
@@ -809,6 +810,10 @@ void HttpServer::handleWrite(int clientFd, int subReactorIndex) {
     }
 
     {
+        // 取一次不可变副本：发送期间 worker 不可能改动它，
+        // 且下一次请求的重置也不会把内容换掉
+        std::shared_ptr<const std::string> respPtr = ctxPtr->takePendingResponse();
+        const std::string& responseData = *respPtr;
         size_t offset = ctxPtr->getWriteOffset();
         size_t bytesWritten = 0;
 
@@ -938,6 +943,10 @@ void HttpServer::processHttpRequest(int subReactorIndex, net::ConnId connId,
             if (it != sr->contexts.end()) {
                 it->second->setResponseData(responseData);
                 it->second->setKeepAlive(keepAlive);
+                // 发布一份不可变副本：I/O 线程按发布副本发送，
+                // 既建立 happens-before，也保证不会被下一次重置改掉
+                it->second->publishResponse(
+                    std::make_shared<const std::string>(responseData));
             }
         }
 
@@ -966,6 +975,7 @@ void HttpServer::processHttpRequest(int subReactorIndex, net::ConnId connId,
             if (it != sr->contexts.end()) {
                 it->second->setResponseData(errData);
                 it->second->setKeepAlive(false);
+                it->second->publishResponse(std::make_shared<const std::string>(errData));
             }
         }
 

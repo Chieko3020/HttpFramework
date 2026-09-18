@@ -44,6 +44,7 @@ void HttpContext::clear() {
     // 重置写入偏移量与截断标志
     writeOffset_ = 0;
     truncated_ = false;
+    dropPendingResponse();
 }
 
 void HttpContext::resetForNextRequest() {
@@ -61,6 +62,7 @@ void HttpContext::resetForNextRequest() {
 
     writeOffset_ = 0;
     truncated_ = false;
+    dropPendingResponse();
 }
 
 void HttpContext::appendData(const std::string& data) {
