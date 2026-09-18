@@ -1,0 +1,62 @@
+=== a7_concurrency: 并发梯度（吞吐/延迟分位/错误率）===
+分支: feature-websocket
+时间: 2026-09-18T18:13:33+08:00
+环境: 2 vCPU / 1968 MB / Linux 6.8.0-90-generic
+工具: wrk 4.2.0 [epoll] Copyright (C) 2012 Will Glozer
+说明: 压测端与被测服务同机环回；服务线程池 --threads 4；wrk -t4 -d30s --latency；HTTP 长连接
+---
+  --- 并发: 100 ---
+    Latency     2.63ms    1.18ms  42.59ms   81.78%
+    Req/Sec     9.54k     1.07k   12.23k    67.75%
+  Latency Distribution
+     50%    2.52ms
+     75%    3.12ms
+     90%    3.78ms
+     99%    5.78ms
+  1140211 requests in 30.03s, 196.82MB read
+Requests/sec:  37974.17
+
+  --- 并发: 500 ---
+    Latency    13.24ms    3.87ms  40.61ms   70.98%
+    Req/Sec     9.38k     1.09k   13.59k    66.47%
+  Latency Distribution
+     50%   13.07ms
+     75%   15.47ms
+     90%   18.09ms
+     99%   23.84ms
+  1120369 requests in 30.03s, 193.39MB read
+Requests/sec:  37307.53
+
+  --- 并发: 1000 ---
+    Latency    27.40ms    6.85ms  76.41ms   71.55%
+    Req/Sec     9.10k     1.20k   13.23k    69.98%
+  Latency Distribution
+     50%   26.98ms
+     75%   31.32ms
+     90%   36.06ms
+     99%   46.27ms
+  1087212 requests in 30.08s, 187.67MB read
+Requests/sec:  36143.34
+
+  --- 并发: 2000 ---
+    Latency    58.94ms   12.11ms 145.01ms   72.96%
+    Req/Sec     8.47k     1.32k   12.23k    66.53%
+  Latency Distribution
+     50%   58.41ms
+     75%   65.79ms
+     90%   73.76ms
+     99%   93.49ms
+  1009584 requests in 30.04s, 174.27MB read
+Requests/sec:  33608.98
+
+  --- 并发: 5000 ---
+    Latency   144.03ms   27.60ms 290.45ms   70.07%
+    Req/Sec     8.65k     1.94k   13.95k    65.99%
+  Latency Distribution
+     50%  141.30ms
+     75%  161.18ms
+     90%  180.81ms
+     99%  216.39ms
+  1030836 requests in 30.10s, 177.94MB read
+Requests/sec:  34244.57
+
