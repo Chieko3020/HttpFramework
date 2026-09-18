@@ -722,6 +722,51 @@ static bool test_idle_reaps_unhandshaked_conn(const std::string& cert, const std
     return true;
 }
 
+// ⑤ 服务端（worker 线程）主动 close() 时，Close 帧必须真的发出去。
+//
+// 缺陷：conn.close(code) 只把 Close 帧入队 + 置 closing + 设 1s close_deadline，
+// 然后由 enqueue 包装统一写 wake_fd；而 wake 路径当时 `if (s.closing) continue;`
+// 跳过关闭中的连接。于是 1s 后 closeConnection 直接 ::close(fd)，Close 帧从未
+// 发出，对端只看到 TCP FIN（无法区分正常关闭与异常 1006）。
+// 判别力：把 src/wss/WssReactor.cpp 的 wake 分支恢复成跳过 closing，本用例失败。
+static bool test_server_initiated_close_frame(const std::string& cert, const std::string& key) {
+    TEST("⑤ 服务端主动 close() 时对端收到 Close 帧（code=1000）");
+    WssFixture f;
+    if (!f.up(cert, key)) FAIL("WSS 服务启动失败");
+
+    // 注册一个"收到消息就主动关闭"的 handler。注意 WsRouter::planFor 取的是
+    // **第一条**匹配的 handler（fixture 已在 /echo 注册了 echo handler），因此
+    // 这里用第二条路由的升级路径，而不是覆盖 /echo。
+    f.router->addHandler("/shut", [](http::WssConnection& conn, const http::wss::WsMessage&) {
+        conn.close(1000);
+    });
+
+    TlsClient c;
+    CHECK(c.connect(f.port), "TLS 连接失败");
+    CHECK(c.writeAll(wsUpgradeRequest("/shut")), "发送升级请求失败");
+    bool got = false;
+    std::string head = c.readHttpHeader(&got);
+    CHECK(got && head.rfind("HTTP/1.1 101", 0) == 0, "升级失败");
+
+    CHECK(c.writeAll(buildClientFrameRaw(0x1, "close-me", true)), "发送消息失败");
+
+    uint8_t opcode = 0;
+    std::string payload;
+    const bool frameArrived = readServerFrame(c, &opcode, &payload, 3000);
+    c.closeAll();
+    f.down();
+
+    CHECK(frameArrived, "服务端应在 close_deadline 前发出 Close 帧，实际只收到 TCP FIN/超时");
+    CHECK(opcode == 0x8, "应收到 opcode=0x8(Close), 实际 " << static_cast<int>(opcode));
+    uint16_t code = 0;
+    if (payload.size() >= 2)
+        code = static_cast<uint16_t>((static_cast<uint8_t>(payload[0]) << 8) |
+                                      static_cast<uint8_t>(payload[1]));
+    CHECK(code == 1000, "Close 帧应带 code=1000, 实际 " << code);
+    PASS();
+    return true;
+}
+
 int main() {
     std::cout << "=== test_wss_hardening ===" << std::endl;
 
@@ -750,6 +795,7 @@ int main() {
     run(test_outbound_order_under_concurrency,   "③ 并发出站顺序", cert, key);
     run(test_router_plan_cache,                  "③ 路由计划缓存", cert, key);
     run(test_idle_reaps_unhandshaked_conn,       "④ 半开连接空闲回收", cert, key);
+    run(test_server_initiated_close_frame,       "⑤ 服务端主动关闭的 Close 帧", cert, key);
 
     { int rc = system(("rm -f " + cert + " " + key).c_str()); (void)rc; }
 

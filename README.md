@@ -729,7 +729,7 @@ cmake --build build --target run_tests
 | `test_edge_cert` | 证书异常：不匹配/缺失/空路径 (需 WSS) | 5 |
 | `test_edge_stress` | 并发压力：1000请求/统计/重启/fd泄露 | 4 |
 | `test_http_hardening` | 加固回归：信号/管线化/框架头/慢速滴灌/畸形请求 (H1-H15) | 20 |
-| `test_wss_hardening` | WSS 回归：升级校验/onClose/分片上限/出站顺序/半开连接回收 (需 WSS) | 10 |
+| `test_wss_hardening` | WSS 回归：升级校验/onClose/分片上限/出站顺序/半开连接回收/Close 帧送达 (需 WSS) | 11 |
 | `test_wss_router` | WsRouter 计划缓存生命周期与失效 (需 WSS) | 3 |
 
 ### 性能基准测试

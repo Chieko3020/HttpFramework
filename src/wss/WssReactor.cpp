@@ -817,14 +817,19 @@ void WssReactor::reactorLoop() {
 
             if (fd == st.wake_fd) {
                 while (true) { uint64_t x; if (::read(st.wake_fd, &x, sizeof(x)) <= 0) break; }
-                // 只处理有出站数据的连接：activeFds 已经排除了未握手/关闭中的连接。
+                // 只处理有出站数据的连接：activeFds 已经排除了未握手/握手失败中的连接。
                 // 每个连接的 outbound_mu 在循环体内短持有、随即释放，不需要全局锁。
+                //
+                // closing 的连接**也要冲刷**：worker 在 handler 里调 conn.close() 时
+                // 只把 Close 帧入队并置 closing，然后 enqueue 包装统一 notifyOutbound；
+                // 如果这里跳过 closing，那 1s 的 close_deadline 到期后 closeConnection
+                // 会直接 ::close(fd)，Close 帧从未发出、对端只看到 TCP FIN（无法区分
+                // 正常关闭与异常 1006）。timer 分支本来就对 closing 连接做 toFlush。
                 std::vector<std::shared_ptr<WssConnection>> toFlush;
                 for (int cfd : st.activeFds) {
                     auto it = st.conns.find(cfd);
                     if (it == st.conns.end()) continue;
                     auto& s = it->second->state;
-                    if (s.closing) continue;
                     bool has_data;
                     {
                         std::lock_guard<std::mutex> olk(s.outbound_mu);
