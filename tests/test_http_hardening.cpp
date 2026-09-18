@@ -687,6 +687,61 @@ static bool test_pool_limit_configurable() {
     return true;
 }
 
+// ── H8：内存池容量悬崖必须显式上报（503），不得静默退化成 413/空响应 ──
+static bool test_pool_exhaustion_reported() {
+    TEST("H8 池耗尽时显式回 503（而不是静默截断成 413）");
+    // 只给 1 个块：第一个连接占住它，第二个连接的请求缓冲分配必然失败
+    int port = pickPort();
+    utils::ThreadPool pool(4);
+    http::HttpServer server(port, pool, 1);
+    server.setIdleTimeout(60);
+    server.enableMemoryPool(true, /*blockSizeBytes=*/0, /*poolBlocks=*/1);
+    auto r = std::make_shared<router::Router>();
+    r->get("/small", [](const http::HttpRequest&, http::HttpResponse& res) {
+        res.setText("SMALL");
+    });
+    server.setRouter(r);
+    CHECK(server.start(), "服务器启动失败");
+    std::this_thread::sleep_for(std::chrono::milliseconds(250));
+
+    // 连接 1：占住唯一的内存块，正常拿到响应
+    int c1 = connectTo(port);
+    CHECK(c1 >= 0, "连接失败");
+    CHECK(sendAll(c1, req("GET", "/small")), "发送失败");
+    auto r1 = readResponse(c1, 5000);
+    CHECK(r1.complete && r1.status.rfind("HTTP/1.1 200", 0) == 0,
+          "第 1 个连接应正常: " << r1.status);
+
+    // 连接 2：池已耗尽 → 必须明确回 503，且响应体说明是服务端容量问题
+    int c2 = connectTo(port);
+    CHECK(c2 >= 0, "连接失败");
+    CHECK(sendAll(c2, req("GET", "/small")), "发送失败");
+    auto r2 = readResponse(c2, 5000);
+    std::cout << "(第2连接 status='" << r2.status << "') ";
+    CHECK(r2.complete, "池耗尽时应给出响应而不是静默挂起");
+    CHECK(r2.status.rfind("HTTP/1.1 503", 0) == 0,
+          "池耗尽应回 503, 实际: " << r2.status);
+    CHECK(r2.body.find("pool exhausted") != std::string::npos,
+          "响应体应说明原因, 实际: " << r2.body);
+    close(c2);
+
+    // 连接 1 关闭后块归还，后续连接恢复正常
+    close(c1);
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    int c3 = connectTo(port);
+    CHECK(c3 >= 0, "连接失败");
+    CHECK(sendAll(c3, req("GET", "/small")), "发送失败");
+    auto r3 = readResponse(c3, 5000);
+    CHECK(r3.complete && r3.status.rfind("HTTP/1.1 200", 0) == 0,
+          "块归还后应恢复正常: " << r3.status);
+    close(c3);
+
+    server.stop();
+    pool.shutdown();
+    PASS();
+    return true;
+}
+
 int main() {
     std::cout << "=== test_http_hardening ===" << std::endl;
     ignoreSigpipeInTest();
@@ -707,6 +762,7 @@ int main() {
     run(test_stop_waits_for_inflight, "H3 stop 排空在途任务");
     run(test_slow_handler_not_killed_by_timer, "H4 慢 handler 不被误杀");
     run(test_pool_limit_configurable, "H7 内存池上限可配置");
+    run(test_pool_exhaustion_reported, "H8 池耗尽显式上报");
 
     std::cout << std::endl
               << "结果: " << g_testsPassed << " 通过, "

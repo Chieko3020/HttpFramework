@@ -723,6 +723,21 @@ void HttpServer::handleRead(int clientFd, int subReactorIndex, net::ConnId connI
     ctxPtr->touch();
     ctxPtr->appendData(data);
 
+    // 内存池分配失败（池耗尽）：服务端容量不足，回 503 而不是 413（H8）
+    if (ctxPtr->isAllocationFailed()) {
+        std::cerr << "[ERROR][HTTP服务器]：内存池耗尽，无法为连接分配请求缓冲, fd="
+                  << clientFd << std::endl;
+        auto response = std::make_shared<HttpResponse>();
+        response->setStatus(503, "Service Unavailable");
+        response->setBody(R"({"error":"Server memory pool exhausted"})");
+        response->setHeader("Content-Type", "application/json");
+        response->setHeader("Connection", "close");
+        response->markFinalized();
+        enqueueRequestTask(subReactorIndex, clientFd, connId,
+                           std::make_shared<HttpRequest>(), response);
+        return;
+    }
+
     // 内存池缓冲区满，请求体被截断
     if (ctxPtr->isTruncated()) {
         // 给出可区分的上限：客户端据此决定分片/重试策略，而不是拿到一个笼统的 413（H7）

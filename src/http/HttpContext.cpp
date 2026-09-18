@@ -40,6 +40,7 @@ void HttpContext::clear() {
     // 重置写入偏移量与截断标志
     writeOffset_ = 0;
     truncated_ = false;
+    allocationFailed_ = false;
     clearCurrentResponse();
 }
 
@@ -51,13 +52,23 @@ void HttpContext::resetForNextRequest() {
 
     writeOffset_ = 0;
     truncated_ = false;
+    allocationFailed_ = false;
     clearCurrentResponse();
 }
 
+// 内存池模式下把数据写入请求缓冲。三种结局必须可区分（H7/H8）：
+//   全部写入        → 正常
+//   写不满（有块）  → truncated_：请求体超过单块容量 → 413
+//   完全写不进（无块/池耗尽）→ allocationFailed_：服务端容量不足 → 503
+// 旧实现把后两种都当成"截断"，池耗尽时会回一个语义错误的 413。
 void HttpContext::appendData(const std::string& data) {
     if (useMemoryPool_) {
         if (!requestBuffer_) {
             requestBuffer_ = std::make_unique<utils::PooledBuffer>(memoryPool_);
+        }
+        if (!requestBuffer_->valid()) {
+            allocationFailed_ = true;
+            return;
         }
         size_t written = requestBuffer_->write(data);
         if (written < data.size()) {
@@ -72,6 +83,10 @@ void HttpContext::appendData(const char* data, size_t len) {
     if (useMemoryPool_) {
         if (!requestBuffer_) {
             requestBuffer_ = std::make_unique<utils::PooledBuffer>(memoryPool_);
+        }
+        if (!requestBuffer_->valid()) {
+            allocationFailed_ = true;
+            return;
         }
         size_t written = requestBuffer_->write(data, len);
         if (written < len) {

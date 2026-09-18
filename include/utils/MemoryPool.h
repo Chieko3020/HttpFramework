@@ -90,6 +90,9 @@ public:
     PooledBuffer(PooledBuffer&& other) noexcept;
     PooledBuffer& operator=(PooledBuffer&& other) noexcept;
     
+    // 是否真正持有一块内存（分配失败时为 false：此缓冲区"永远写不进"）
+    bool valid() const { return block_ != nullptr; }
+
     // 数据操作
     char* data() { return block_ ? block_->data : nullptr; }
     const char* data() const { return block_ ? block_->data : nullptr; }

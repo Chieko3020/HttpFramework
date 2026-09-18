@@ -74,6 +74,10 @@ public:
     // 缓冲区截断检测（内存池单块容量不足时置位）
     bool isTruncated() const { return truncated_; }
 
+    // 内存池分配失败（池耗尽）：请求缓冲根本没拿到块，写入量为 0。
+    // 这是"服务端容量不足"（应回 503），与"请求体超过单块容量"（413）语义不同（H8）
+    bool isAllocationFailed() const { return allocationFailed_; }
+
     // ── 在途请求计数（H4）──
     // "该连接上有一个请求已被派发给业务线程、响应尚未发出"。
     // 空闲超时清理必须跳过这类连接：慢 handler（超过 idleTimeout）不代表连接空闲，
@@ -128,6 +132,7 @@ private:
     // 写入进度跟踪
     size_t writeOffset_;
     bool truncated_ = false;
+    bool allocationFailed_ = false;
 
     // 在途请求计数（H4，见上方 enterInFlight 说明）
     std::atomic<int> inFlight_{0};
