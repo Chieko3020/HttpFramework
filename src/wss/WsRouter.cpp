@@ -65,13 +65,17 @@ void WsRouter::addHandler(const std::string& path, WsHandler handler) {
     entry.pathRegex = std::move(regex);
     entry.paramNames = std::move(paramNames);
     entry.handler = std::move(handler);
+    std::lock_guard<std::mutex> lk(planMu_);
     routes_.push_back(std::move(entry));
+    invalidatePlanCacheLocked();
 }
 
 void WsRouter::addMiddleware(WsMiddleware mw) {
     MwEntry entry;
     entry.middleware = std::move(mw);
+    std::lock_guard<std::mutex> lk(planMu_);
     globalMws_.push_back(std::move(entry));
+    invalidatePlanCacheLocked();
 }
 
 void WsRouter::addMiddleware(const std::string& path, WsMiddleware mw) {
@@ -80,26 +84,31 @@ void WsRouter::addMiddleware(const std::string& path, WsMiddleware mw) {
     entry.path = path;
     entry.pathRegex = std::move(regex);
     entry.middleware = std::move(mw);
+    std::lock_guard<std::mutex> lk(planMu_);
     scopedMws_.push_back(std::move(entry));
+    invalidatePlanCacheLocked();
 }
 
 void WsRouter::setOpenHandler(const std::string& path, WsOpenHandler h) {
-    auto [regex, paramNames] = compilePath(path);
+    std::lock_guard<std::mutex> lk(planMu_);
     // 找已有路由或新建
     for (auto& r : routes_) {
-        if (r.path == path) { r.openHandler = std::move(h); return; }
+        if (r.path == path) { r.openHandler = std::move(h); invalidatePlanCacheLocked(); return; }
     }
+    auto [regex, paramNames] = compilePath(path);
     RouteEntry entry;
     entry.path = path;
     entry.pathRegex = std::move(regex);
     entry.paramNames = std::move(paramNames);
     entry.openHandler = std::move(h);
     routes_.push_back(std::move(entry));
+    invalidatePlanCacheLocked();
 }
 
 void WsRouter::setCloseHandler(const std::string& path, WsCloseHandler h) {
+    std::lock_guard<std::mutex> lk(planMu_);
     for (auto& r : routes_) {
-        if (r.path == path) { r.closeHandler = std::move(h); return; }
+        if (r.path == path) { r.closeHandler = std::move(h); invalidatePlanCacheLocked(); return; }
     }
     auto [regex, paramNames] = compilePath(path);
     RouteEntry entry;
@@ -108,43 +117,45 @@ void WsRouter::setCloseHandler(const std::string& path, WsCloseHandler h) {
     entry.paramNames = std::move(paramNames);
     entry.closeHandler = std::move(h);
     routes_.push_back(std::move(entry));
+    invalidatePlanCacheLocked();
 }
 
 // ── 路径计划：解析一次、缓存复用 ───────────────────────────────────
 
-const WsRouter::PathPlan& WsRouter::planFor(const std::string& upgradePath) const {
-    {
-        std::lock_guard<std::mutex> lk(planMu_);
-        auto it = planCache_.find(upgradePath);
-        if (it != planCache_.end()) return it->second;
-    }
+std::shared_ptr<const WsRouter::PathPlan> WsRouter::planFor(const std::string& upgradePath) const {
+    std::lock_guard<std::mutex> lk(planMu_);
 
-    // 未命中：构建计划（只有"新路径的第一条消息"走这里）
-    PathPlan plan;
+    auto it = planCache_.find(upgradePath);
+    if (it != planCache_.end()) return it->second;
+
+    // 未命中：构建计划（只有"新路径的第一条消息"走这里）。
+    // 全程持 planMu_：注册路径也要拿同一把锁，因此这里读到的 routes_ 不会
+    // 与 push_back 并发；而 deque 的元素地址在插入时保持不变，计划里保存的
+    // 元素指针在注册之后依旧有效（清除缓存只是为了否定结论不陈旧）。
+    auto plan = std::make_shared<PathPlan>();
     for (const auto& route : routes_) {
         if (route.handler && std::regex_match(upgradePath, route.pathRegex)) {
-            plan.route = &route;
-            plan.hasHandler = true;
+            plan->route = &route;
             break;
         }
     }
-    for (const auto& mw : globalMws_) plan.chain.push_back(&mw);
+    for (const auto& mw : globalMws_) plan->chain.push_back(&mw);
     for (const auto& mw : scopedMws_) {
-        if (std::regex_match(upgradePath, mw.pathRegex)) plan.chain.push_back(&mw);
+        if (std::regex_match(upgradePath, mw.pathRegex)) plan->chain.push_back(&mw);
     }
 
-    std::lock_guard<std::mutex> lk(planMu_);
-    auto [it, inserted] = planCache_.emplace(upgradePath, std::move(plan));
-    (void)inserted;
-    return it->second;
+    planCache_.emplace(upgradePath, plan);
+    return plan;
 }
 
 // ── 分发 ───────────────────────────────────────────────────────────
 
 void WsRouter::dispatch(const std::string& upgradePath, WssConnection& conn, WsMessage& msg) {
-    const PathPlan& plan = planFor(upgradePath);
-    if (plan.route) extractParams(*plan.route, upgradePath, conn);
-    executeChain(plan, conn, msg);
+    // 取一份共享的、不可变的计划：dispatch 在锁外执行链，期间其他线程注册
+    // 路由也不会让这份计划失效（shared_ptr 保活，指针指向 deque 元素）。
+    const std::shared_ptr<const PathPlan> plan = planFor(upgradePath);
+    if (plan->route) extractParams(*plan->route, upgradePath, conn);
+    executeChain(*plan, conn, msg);
 }
 
 // ── 中间件链执行 ──────────────────────────────────────────────────

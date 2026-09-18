@@ -71,6 +71,11 @@ if(ENABLE_WSS)
     add_executable(test_wss_hardening test_wss_hardening.cpp)
     target_link_libraries(test_wss_hardening PRIVATE http_framework)
     target_compile_definitions(test_wss_hardening PRIVATE ${TEST_DEFS})
+
+    # WsRouter 路径计划缓存的生命周期/失效回归（曾引入 heap-use-after-free）
+    add_executable(test_wss_router test_wss_router.cpp)
+    target_link_libraries(test_wss_router PRIVATE http_framework)
+    target_compile_definitions(test_wss_router PRIVATE ${TEST_DEFS})
 endif()
 
 add_executable(test_edge_stress test_edge_stress.cpp)
@@ -105,6 +110,7 @@ set(ALL_TESTS
 if(ENABLE_WSS)
     list(APPEND ALL_TESTS test_edge_cert)
     list(APPEND ALL_TESTS test_wss_hardening)
+    list(APPEND ALL_TESTS test_wss_router)
 endif()
 
 # ── CTest 注册 ──

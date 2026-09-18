@@ -5,6 +5,7 @@
 
 #include "WssTypes.h"
 
+#include <deque>
 #include <functional>
 #include <memory>
 #include <mutex>
@@ -55,7 +56,6 @@ public:
     // 只解析一次，之后每次消息只是取一份指针列表。
     struct PathPlan {
         const RouteEntry* route{nullptr};
-        bool hasHandler{false};
         std::vector<const MwEntry*> chain;   // 全局中间件 + 该路径匹配的作用域中间件
     };
 
@@ -68,17 +68,26 @@ public:
     void onClose(const std::string& upgradePath, WssConnection& conn, uint16_t code);
 
 private:
-    std::vector<MwEntry> globalMws_;
-    std::vector<MwEntry> scopedMws_;
-    std::vector<RouteEntry> routes_;
+    // 注册表用 std::deque 而不是 std::vector：planCache_ 里的 PathPlan 持有
+    // 元素的指针，deque 在两端插入时**不搬移已存在的元素**（引用/指针保持有效），
+    // 因此缓存建立后再 addHandler/addMiddleware 也不会让缓存里的指针悬空。
+    // 若改回 vector，扩容会让缓存里的指针全部失效（heap-use-after-free）。
+    std::deque<MwEntry> globalMws_;
+    std::deque<MwEntry> scopedMws_;
+    std::deque<RouteEntry> routes_;
 
-    // upgradePath → PathPlan（惰性填充）。middlewares_/routes_ 只追加不清空，
-    // 因此缓存里的指针在 WsRouter 生命周期内有效。
+    // upgradePath → PathPlan（惰性填充）。注册（addHandler/addMiddleware/
+    // setOpenHandler/setCloseHandler）会清空这份缓存，避免"注册前的未命中
+    // 结论"把新注册的路由/中间件永久屏蔽（否定结论不能长期缓存）。
     mutable std::mutex planMu_;
-    mutable std::unordered_map<std::string, PathPlan> planCache_;
+    mutable std::unordered_map<std::string, std::shared_ptr<const PathPlan>> planCache_;
 
-    // 解析（或取缓存的）路径计划
-    const PathPlan& planFor(const std::string& upgradePath) const;
+    // 注册/注销后使缓存失效（调用方需持有 planMu_）
+    void invalidatePlanCacheLocked() { planCache_.clear(); }
+
+    // 解析（或取缓存的）路径计划。返回 shared_ptr：调用方在锁外使用这份计划，
+    // 期间可能有其他线程注册路由并触发 planCache_ 重哈希，值语义才能真正保活。
+    std::shared_ptr<const PathPlan> planFor(const std::string& upgradePath) const;
 
     // 将 /users/:id 转为 ^/users/([^/]+)$
     static std::pair<std::regex, std::vector<std::string>> compilePath(const std::string& path);
