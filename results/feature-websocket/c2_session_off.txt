@@ -1,0 +1,15 @@
+=== c2_session_off: Session OFF 时的吞吐量 ===
+分支: feature-websocket
+时间: 2026-09-18T16:20:32+08:00
+环境: 2 vCPU / 1968 MB / Linux 6.8.0-90-generic
+工具: wrk 4.2.0 [epoll] Copyright (C) 2012 Will Glozer
+说明: 压测端与被测服务同机（环回），服务线程数见各项 --threads，wrk 线程数 -t2
+---
+Running 30s test @ http://localhost:18980/bench/plaintext
+  2 threads and 100 connections
+  Thread Stats   Avg      Stdev     Max   +/- Stdev
+    Latency     2.90ms    1.25ms  21.41ms   75.02%
+    Req/Sec    17.06k     2.39k   22.81k    69.17%
+  1019622 requests in 30.04s, 176.00MB read
+Requests/sec:  33945.33
+Transfer/sec:      5.86MB

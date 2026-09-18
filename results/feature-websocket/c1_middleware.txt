@@ -1,0 +1,44 @@
+=== c1_middleware: 不同中间件层数的吞吐量变化 ===
+分支: feature-websocket
+时间: 2026-09-18T16:19:24+08:00
+环境: 2 vCPU / 1968 MB / Linux 6.8.0-90-generic
+工具: wrk 4.2.0 [epoll] Copyright (C) 2012 Will Glozer
+说明: 压测端与被测服务同机（环回），服务线程数见各项 --threads，wrk 线程数 -t2
+---
+  --- 中间件层数: 0 ---
+Running 15s test @ http://localhost:18980/bench/plaintext
+  2 threads and 100 connections
+  Thread Stats   Avg      Stdev     Max   +/- Stdev
+    Latency     2.89ms    1.20ms  17.11ms   72.90%
+    Req/Sec    17.04k     2.29k   24.78k    65.00%
+  509298 requests in 15.03s, 87.91MB read
+  Socket errors: connect 0, read 1, write 0, timeout 0
+Requests/sec:  33891.28
+Transfer/sec:      5.85MB
+  --- 中间件层数: 1 ---
+Running 15s test @ http://localhost:18980/bench/plaintext
+  2 threads and 100 connections
+  Thread Stats   Avg      Stdev     Max   +/- Stdev
+    Latency     3.01ms    1.36ms  18.28ms   73.98%
+    Req/Sec    16.44k     2.23k   22.90k    63.33%
+  491472 requests in 15.03s, 84.84MB read
+Requests/sec:  32709.18
+Transfer/sec:      5.65MB
+  --- 中间件层数: 5 ---
+Running 15s test @ http://localhost:18980/bench/plaintext
+  2 threads and 100 connections
+  Thread Stats   Avg      Stdev     Max   +/- Stdev
+    Latency     3.68ms    1.75ms  21.27ms   73.04%
+    Req/Sec    13.42k     2.49k   21.12k    70.00%
+  401871 requests in 15.05s, 69.37MB read
+Requests/sec:  26701.74
+Transfer/sec:      4.61MB
+  --- 中间件层数: 10 ---
+Running 15s test @ http://localhost:18980/bench/plaintext
+  2 threads and 100 connections
+  Thread Stats   Avg      Stdev     Max   +/- Stdev
+    Latency     5.70ms    2.24ms  21.48ms   68.93%
+    Req/Sec     8.66k     1.90k   12.15k    55.67%
+  260231 requests in 15.10s, 44.92MB read
+Requests/sec:  17237.13
+Transfer/sec:      2.98MB

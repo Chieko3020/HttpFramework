@@ -1,0 +1,15 @@
+=== b2_mempool_on: 内存池 ON 时的吞吐量 ===
+分支: feature-websocket
+时间: 2026-09-18T16:17:43+08:00
+环境: 2 vCPU / 1968 MB / Linux 6.8.0-90-generic
+工具: wrk 4.2.0 [epoll] Copyright (C) 2012 Will Glozer
+说明: 压测端与被测服务同机（环回），服务线程数见各项 --threads，wrk 线程数 -t2
+---
+Running 30s test @ http://localhost:18980/bench/plaintext
+  2 threads and 500 connections
+  Thread Stats   Avg      Stdev     Max   +/- Stdev
+    Latency    18.34ms    5.25ms  49.55ms   70.23%
+    Req/Sec    13.44k     2.03k   19.99k    70.90%
+  803457 requests in 30.06s, 138.69MB read
+Requests/sec:  26731.95
+Transfer/sec:      4.61MB

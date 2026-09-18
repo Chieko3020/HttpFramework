@@ -1,0 +1,18 @@
+=== a6_cpu_cost: 每请求 CPU 时间 (utime+stime / 请求数) ===
+分支: feature-websocket
+时间: 2026-09-18T16:15:14+08:00
+环境: 2 vCPU / 1968 MB / Linux 6.8.0-90-generic
+工具: wrk 4.2.0 [epoll] Copyright (C) 2012 Will Glozer
+说明: 压测端与被测服务同机（环回），服务线程数见各项 --threads，wrk 线程数 -t2
+---
+Running 30s test @ http://localhost:18980/bench/plaintext
+  2 threads and 500 connections
+  Thread Stats   Avg      Stdev     Max   +/- Stdev
+    Latency    15.24ms    4.58ms  44.31ms   69.60%
+    Req/Sec    16.08k     2.41k   25.61k    69.40%
+  960997 requests in 30.07s, 165.88MB read
+Requests/sec:  31963.29
+Transfer/sec:      5.52MB
+CPU ticks: 0 -> 3673 (CLK_TCK=100)
+总请求: 960997
+每请求 CPU 时间: 38.22 us

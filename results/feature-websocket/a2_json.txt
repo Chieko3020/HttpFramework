@@ -1,0 +1,15 @@
+=== a2_json: JSON 响应吞吐量 ===
+分支: feature-websocket
+时间: 2026-09-18T16:11:46+08:00
+环境: 2 vCPU / 1968 MB / Linux 6.8.0-90-generic
+工具: wrk 4.2.0 [epoll] Copyright (C) 2012 Will Glozer
+说明: 压测端与被测服务同机（环回），服务线程数见各项 --threads，wrk 线程数 -t2
+---
+Running 30s test @ http://localhost:18980/bench/json
+  2 threads and 100 connections
+  Thread Stats   Avg      Stdev     Max   +/- Stdev
+    Latency     2.78ms    1.16ms  17.30ms   71.86%
+    Req/Sec    17.70k     2.17k   23.05k    63.83%
+  1057702 requests in 30.03s, 202.75MB read
+Requests/sec:  35217.38
+Transfer/sec:      6.75MB

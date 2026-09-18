@@ -1,0 +1,20 @@
+=== a3_latency: 延迟分布 (带详细分位) ===
+分支: feature-websocket
+时间: 2026-09-18T16:12:18+08:00
+环境: 2 vCPU / 1968 MB / Linux 6.8.0-90-generic
+工具: wrk 4.2.0 [epoll] Copyright (C) 2012 Will Glozer
+说明: 压测端与被测服务同机（环回），服务线程数见各项 --threads，wrk 线程数 -t2
+---
+Running 30s test @ http://localhost:18980/bench/json
+  2 threads and 100 connections
+  Thread Stats   Avg      Stdev     Max   +/- Stdev
+    Latency     2.89ms    1.19ms  19.31ms   72.10%
+    Req/Sec    17.02k     2.13k   22.82k    66.00%
+  Latency Distribution
+     50%    2.75ms
+     75%    3.51ms
+     90%    4.42ms
+     99%    6.35ms
+  1016739 requests in 30.03s, 194.90MB read
+Requests/sec:  33857.10
+Transfer/sec:      6.49MB

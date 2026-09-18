@@ -1,0 +1,43 @@
+=== b3_routes: 不同路由数量的吞吐量退化 ===
+分支: feature-websocket
+时间: 2026-09-18T16:18:16+08:00
+环境: 2 vCPU / 1968 MB / Linux 6.8.0-90-generic
+工具: wrk 4.2.0 [epoll] Copyright (C) 2012 Will Glozer
+说明: 压测端与被测服务同机（环回），服务线程数见各项 --threads，wrk 线程数 -t2
+---
+  --- 路由数: 10 ---
+Running 15s test @ http://localhost:18980/bench/plaintext
+  2 threads and 100 connections
+  Thread Stats   Avg      Stdev     Max   +/- Stdev
+    Latency     2.83ms    1.20ms  21.36ms   73.71%
+    Req/Sec    17.43k     2.07k   23.55k    64.33%
+  520664 requests in 15.02s, 89.87MB read
+Requests/sec:  34655.46
+Transfer/sec:      5.98MB
+  --- 路由数: 100 ---
+Running 15s test @ http://localhost:18980/bench/plaintext
+  2 threads and 100 connections
+  Thread Stats   Avg      Stdev     Max   +/- Stdev
+    Latency     2.89ms    1.22ms  18.36ms   72.83%
+    Req/Sec    17.05k     2.02k   23.37k    64.00%
+  509687 requests in 15.02s, 87.98MB read
+Requests/sec:  33932.09
+Transfer/sec:      5.86MB
+  --- 路由数: 500 ---
+Running 15s test @ http://localhost:18980/bench/plaintext
+  2 threads and 100 connections
+  Thread Stats   Avg      Stdev     Max   +/- Stdev
+    Latency     2.90ms    1.27ms  18.87ms   74.62%
+    Req/Sec    17.08k     2.50k   22.07k    65.33%
+  510530 requests in 15.03s, 88.13MB read
+Requests/sec:  33975.43
+Transfer/sec:      5.86MB
+  --- 路由数: 1000 ---
+Running 15s test @ http://localhost:18980/bench/plaintext
+  2 threads and 100 connections
+  Thread Stats   Avg      Stdev     Max   +/- Stdev
+    Latency     3.23ms    1.22ms  12.99ms   71.79%
+    Req/Sec    15.29k     1.70k   21.04k    76.00%
+  456937 requests in 15.02s, 78.87MB read
+Requests/sec:  30419.28
+Transfer/sec:      5.25MB

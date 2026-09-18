@@ -1,0 +1,15 @@
+=== a1_plaintext_hc: 纯文本吞吐量 - 1000 并发 ===
+分支: feature-websocket
+时间: 2026-09-18T16:11:14+08:00
+环境: 2 vCPU / 1968 MB / Linux 6.8.0-90-generic
+工具: wrk 4.2.0 [epoll] Copyright (C) 2012 Will Glozer
+说明: 压测端与被测服务同机（环回），服务线程数见各项 --threads，wrk 线程数 -t2
+---
+Running 30s test @ http://localhost:18980/bench/plaintext
+  2 threads and 1000 connections
+  Thread Stats   Avg      Stdev     Max   +/- Stdev
+    Latency    30.28ms    8.31ms  84.05ms   71.07%
+    Req/Sec    16.24k     2.54k   23.30k    62.81%
+  970234 requests in 30.09s, 167.48MB read
+Requests/sec:  32240.81
+Transfer/sec:      5.57MB

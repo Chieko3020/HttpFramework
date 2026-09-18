@@ -1,0 +1,52 @@
+=== a4_maxconn: 逐步提高并发找上限 ===
+分支: feature-websocket
+时间: 2026-09-18T16:12:50+08:00
+环境: 2 vCPU / 1968 MB / Linux 6.8.0-90-generic
+工具: wrk 4.2.0 [epoll] Copyright (C) 2012 Will Glozer
+说明: 压测端与被测服务同机（环回），服务线程数见各项 --threads，wrk 线程数 -t2
+---
+  --- 并发: 100 ---
+Running 15s test @ http://localhost:18980/bench/plaintext
+  2 threads and 100 connections
+  Thread Stats   Avg      Stdev     Max   +/- Stdev
+    Latency     3.14ms    1.14ms  14.59ms   72.11%
+    Req/Sec    15.68k     1.37k   21.11k    84.67%
+  468419 requests in 15.02s, 80.86MB read
+Requests/sec:  31196.26
+Transfer/sec:      5.38MB
+  --- 并发: 500 ---
+Running 15s test @ http://localhost:18980/bench/plaintext
+  2 threads and 500 connections
+  Thread Stats   Avg      Stdev     Max   +/- Stdev
+    Latency    16.38ms    4.47ms  51.04ms   71.21%
+    Req/Sec    14.98k     1.77k   22.62k    79.33%
+  449132 requests in 15.09s, 77.53MB read
+Requests/sec:  29773.12
+Transfer/sec:      5.14MB
+  --- 并发: 1000 ---
+Running 15s test @ http://localhost:18980/bench/plaintext
+  2 threads and 1000 connections
+  Thread Stats   Avg      Stdev     Max   +/- Stdev
+    Latency    32.46ms    8.84ms  92.94ms   70.93%
+    Req/Sec    15.18k     2.42k   20.91k    66.78%
+  452373 requests in 15.02s, 78.09MB read
+Requests/sec:  30122.67
+Transfer/sec:      5.20MB
+  --- 并发: 2000 ---
+Running 15s test @ http://localhost:18980/bench/plaintext
+  2 threads and 2000 connections
+  Thread Stats   Avg      Stdev     Max   +/- Stdev
+    Latency    76.02ms   13.83ms 138.98ms   77.06%
+    Req/Sec    12.97k     1.60k   17.09k    65.99%
+  386612 requests in 15.09s, 66.74MB read
+Requests/sec:  25615.76
+Transfer/sec:      4.42MB
+  --- 并发: 5000 ---
+Running 15s test @ http://localhost:18980/bench/plaintext
+  2 threads and 5000 connections
+  Thread Stats   Avg      Stdev     Max   +/- Stdev
+    Latency   154.54ms   31.24ms 322.55ms   71.32%
+    Req/Sec    15.87k     3.81k   25.25k    66.89%
+  470483 requests in 15.10s, 81.21MB read
+Requests/sec:  31158.26
+Transfer/sec:      5.38MB
