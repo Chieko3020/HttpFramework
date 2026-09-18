@@ -5,6 +5,7 @@
 #include "http/HttpServer.h"
 #include "router/Router.h"
 #include "utils/ThreadPool.h"
+#include "utils/db/DbConnectionPool.h"
 #include <iostream>
 #include <cstring>
 #include <string>
@@ -235,6 +236,37 @@ static bool test_port_conflict() {
     return true;
 }
 
+// ── M13：DB 连接池健壮性（不需要真实 MySQL：连接必然失败） ──
+// 覆盖：失败路径上的重复 initialize 幂等、带超时的 getConnection 不永久阻塞、
+// shutdown 幂等。注意："健康检查线程已启动时重复 initialize 不会 std::terminate"
+// 依赖 initialize() 的 initialized_/joinable 守卫，本机无 MySQL 实例，
+// 无法在测试里真正启动健康检查线程来验证（见简报"未验证"）。
+static bool test_db_pool_robustness() {
+    TEST("M13 失败路径重复 initialize 幂等；带超时 getConnection 不永久阻塞");
+    // 指向一个必然拒绝连接的地址，initialize 会失败——关键在于不能崩
+    db::DbConnectionPool pool("127.0.0.1", "u", "p", "d", /*port=*/1, /*maxConnections=*/2);
+
+    const bool first = pool.initialize();     // 预期 false（连不上）
+    std::cout << "(首次 initialize=" << (first ? "true" : "false") << ") ";
+    // 重复 initialize：旧实现在这里对 joinable 线程二次赋值 → std::terminate
+    const bool second = pool.initialize();
+    CHECK(first == second, "重复 initialize 必须幂等（不得 terminate、不得改变结论）");
+
+    // 带超时的 getConnection 必须在超时后返回 nullptr，而不是永久挂在条件变量上
+    const auto t0 = std::chrono::steady_clock::now();
+    auto conn = pool.getConnection(std::chrono::milliseconds(200));
+    const auto waited = std::chrono::duration_cast<std::chrono::milliseconds>(
+                            std::chrono::steady_clock::now() - t0).count();
+    std::cout << "(带超时 getConnection 耗时=" << waited << "ms) ";
+    CHECK(conn == nullptr, "池为空时应返回 nullptr");
+    CHECK(waited < 3000, "带超时的 getConnection 不应长时间阻塞, 实际 " << waited << "ms");
+
+    pool.shutdown();
+    pool.shutdown();   // 幂等
+    PASS();
+    return true;
+}
+
 int main() {
     std::cout << "=== test_edge_input ===" << std::endl;
 
@@ -250,6 +282,7 @@ int main() {
     run(test_empty_request,           "空请求");
     run(test_is_port_in_use,         "端口占用检测");
     run(test_port_conflict,          "同端口拒绝");
+    run(test_db_pool_robustness,      "M13 连接池健壮性");
 
     std::cout << std::endl
               << "结果: " << g_testsPassed << " 通过, "

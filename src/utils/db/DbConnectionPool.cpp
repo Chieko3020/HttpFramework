@@ -18,7 +18,11 @@ DbConnectionPool::~DbConnectionPool() {
 
 bool DbConnectionPool::initialize() {
     std::lock_guard<std::mutex> lock(mutex_);
-    
+
+    if (initialized_.load()) {
+        return true;   // 幂等（M13）
+    }
+
     try {
         // 创建初始连接
         for (int i = 0; i < maxConnections_; ++i) {
@@ -36,9 +40,13 @@ bool DbConnectionPool::initialize() {
             return false;
         }
         
-        // 启动健康检查线程
+        // 启动健康检查线程（先置 initialized_，避免重复 initialize 二次赋值 joinable 线程）
+        if (healthCheckThread_.joinable()) {
+            return true;
+        }
         healthCheckRunning_ = true;
         healthCheckThread_ = std::thread(&DbConnectionPool::healthCheckLoop, this);
+        initialized_.store(true);
         
         std::cout << "[INFO][数据库]：连接池初始化完成, 连接数=" 
                   << availableConnections_.size() << "" << std::endl;
@@ -51,7 +59,9 @@ bool DbConnectionPool::initialize() {
 }
 
 void DbConnectionPool::shutdown() {
-    shutdown_ = true;
+    if (shutdown_.exchange(true)) {
+        return;   // 幂等（M13）
+    }
     
     // 停止健康检查线程
     if (healthCheckThread_.joinable()) {
@@ -84,25 +94,49 @@ void DbConnectionPool::shutdown() {
     }
     
     allConnections_.clear();
+    initialized_.store(false);
     std::cout << "[INFO][数据库]：连接池已关闭" << std::endl;
 }
 
 std::shared_ptr<DbConnection> DbConnectionPool::getConnection() {
     std::unique_lock<std::mutex> lock(mutex_);
-    
+
     // 等待可用连接
-    condition_.wait(lock, [this] { 
-        return !availableConnections_.empty() || shutdown_; 
+    condition_.wait(lock, [this] {
+        return !availableConnections_.empty() || shutdown_;
     });
-    
+
     if (shutdown_) {
         return nullptr;
     }
-    
+
     auto conn = availableConnections_.front();
     availableConnections_.pop();
-    
+
     return conn;
+}
+
+std::shared_ptr<DbConnection> DbConnectionPool::getConnection(
+    std::chrono::milliseconds timeout) {
+    std::unique_lock<std::mutex> lock(mutex_);
+
+    // 带超时：池耗尽时不再让请求线程永久阻塞（M13）
+    bool ready = condition_.wait_for(lock, timeout, [this] {
+        return !availableConnections_.empty() || shutdown_;
+    });
+
+    if (!ready || shutdown_ || availableConnections_.empty()) {
+        return nullptr;
+    }
+
+    auto conn = availableConnections_.front();
+    availableConnections_.pop();
+    return conn;
+}
+
+DbConnectionPool::ConnectionGuard DbConnectionPool::ConnectionGuard::acquire(
+    DbConnectionPool& pool, std::chrono::milliseconds timeout) {
+    return ConnectionGuard(&pool, pool.getConnection(timeout));
 }
 
 void DbConnectionPool::returnConnection(std::shared_ptr<DbConnection> conn) {
@@ -117,6 +151,15 @@ void DbConnectionPool::returnConnection(std::shared_ptr<DbConnection> conn) {
         return;
     }
     
+    // 只回收本池已知的连接（M13）：否则会把别人/已析构的连接塞进池里
+    bool known = false;
+    for (const auto& existing : allConnections_) {
+        if (existing == conn) { known = true; break; }
+    }
+    if (!known) {
+        return;
+    }
+
     // 检查连接是否仍然有效
     if (conn->isConnected()) {
         availableConnections_.push(conn);
@@ -150,17 +193,25 @@ size_t DbConnectionPool::getTotalConnections() const {
 
 void DbConnectionPool::healthCheck() {
     std::lock_guard<std::mutex> lock(mutex_);
-    
-    for (auto& conn : allConnections_) {
+
+    // 只检查空闲连接（M13）：借出中的连接正在被业务线程使用，
+    // MySQL Connector/C++ 的 Connection 不是线程安全的，并发使用会协议错乱。
+    std::queue<std::shared_ptr<DbConnection>> tmp;
+    while (!availableConnections_.empty()) {
+        auto conn = availableConnections_.front();
+        availableConnections_.pop();
+        if (!conn) continue;
         if (!conn->isConnected()) {
-            std::cout << "[INFO][数据库]：检测到断连，尝试重连..." << std::endl;
+            std::cout << "[INFO][数据库]：检测到空闲连接断连，尝试重连..." << std::endl;
             if (conn->connect()) {
                 std::cout << "[DEBUG][数据库]：重连成功" << std::endl;
             } else {
                 std::cerr << "[ERROR][数据库]：重连失败" << std::endl;
             }
         }
+        tmp.push(conn);
     }
+    availableConnections_.swap(tmp);
 }
 
 std::shared_ptr<DbConnection> DbConnectionPool::createConnection() {
