@@ -5,10 +5,13 @@
 
 #include "session/SessionManager.h"
 #include "session/Session.h"
+#include "session/SessionStorage.h"
 #include "middleware/SessionMiddleware.h"
 #include "http/HttpRequest.h"
 #include "http/HttpResponse.h"
+#include <filesystem>
 #include <iostream>
+#include <cstdlib>
 #include <chrono>
 #include <thread>
 
@@ -265,6 +268,69 @@ static bool test_session_middleware_reuses_session() {
     return true;
 }
 
+// ── M12：文件存储的会话 ID 校验与原子写 ──
+static bool test_file_storage_hardening() {
+    TEST("M12 文件存储拒绝非法 sessionId（路径穿越）且写入可读回");
+    const std::string dir = "/tmp/hf_session_m12";
+    { int rc = system(("rm -rf " + dir).c_str()); (void)rc; }
+    session::FileSessionStorage store(dir);
+
+    // 路径穿越：非法 ID 不得落到存储目录之外
+    const std::string evil = "../../etc/hf_pwned";
+    auto s1 = std::make_shared<session::Session>(evil);
+    s1->set("k", "v");
+    CHECK(!store.saveSession(s1), "非法 sessionId 不得被写入");
+    CHECK(!std::filesystem::exists("/etc/hf_pwned.session"), "不得写出存储目录之外的文件");
+    CHECK(store.loadSession(evil) == nullptr, "非法 sessionId 读取应返回 nullptr");
+    CHECK(!store.hasSession(evil), "非法 sessionId hasSession 应为 false");
+    CHECK(!store.deleteSession(evil), "非法 sessionId 删除应返回 false");
+
+    // 合法 ID：写→读→原子写留下的临时文件不应残留
+    const std::string good = "abcdef0123456789abcdef0123456789";
+    auto s2 = std::make_shared<session::Session>(good);
+    s2->set("user", "chieko");
+    CHECK(store.saveSession(s2), "合法会话应写入成功");
+    auto back = store.loadSession(good);
+    CHECK(back != nullptr, "应能读回会话");
+    CHECK(back->get("user") == "chieko", "会话数据应完整");
+    CHECK(!std::filesystem::exists(dir + "/" + good + ".session.tmp"), "不得残留临时文件");
+
+    { int rc = system(("rm -rf " + dir).c_str()); (void)rc; }
+    PASS();
+    return true;
+}
+
+static bool test_session_cookie_refresh() {
+    TEST("M12 已有会话的响应会刷新 Set-Cookie（滑动续期不脱钩）");
+    auto mgr = std::make_shared<session::SessionManager>(std::chrono::seconds(60));
+    auto mw = middleware::session_utils::createSessionMiddleware(mgr);
+
+    // 第一次请求：新会话 → 下发 cookie
+    http::HttpRequest req1;
+    http::HttpResponse res1;
+    bool next1 = false;
+    mw(req1, res1, [&next1]() { next1 = true; });
+    CHECK(next1, "中间件应调用 next()");
+    const std::string cookie1 = res1.getHeader("Set-Cookie");
+    CHECK(!cookie1.empty(), "新会话应下发 Set-Cookie");
+
+    // 提取 sessionId 并放进第二个请求的 Cookie 头
+    const std::string id = cookie1.substr(cookie1.find('=') + 1,
+                                          cookie1.find(';') - cookie1.find('=') - 1);
+    http::HttpRequest req2;
+    req2.parse("GET / HTTP/1.1\r\nHost: x\r\nCookie: session_id=" + id + "\r\n\r\n");
+    http::HttpResponse res2;
+    bool next2 = false;
+    mw(req2, res2, [&next2]() { next2 = true; });
+    const std::string cookie2 = res2.getHeader("Set-Cookie");
+    std::cout << "(第二次请求是否刷新 cookie=" << (cookie2.empty() ? "否" : "是") << ") ";
+    CHECK(!cookie2.empty(), "已有会话也必须刷新 Set-Cookie（否则 cookie 先于会话过期）");
+    CHECK(cookie2.find(id) != std::string::npos, "刷新时不得换掉 sessionId");
+
+    PASS();
+    return true;
+}
+
 int main() {
     std::cout << "=== test_http_session ===" << std::endl;
 
@@ -285,6 +351,8 @@ int main() {
     run(test_session_manager_set_default_expiration, "设置默认过期");
     run(test_session_middleware_creates_session, "中间件创建会话");
     run(test_session_middleware_reuses_session,  "中间件复用会话");
+    run(test_file_storage_hardening,             "M12 文件存储加固");
+    run(test_session_cookie_refresh,             "M12 cookie 续期刷新");
 
     std::cout << std::endl
               << "结果: " << g_testsPassed << " 通过, "

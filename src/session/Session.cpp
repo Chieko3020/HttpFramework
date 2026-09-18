@@ -12,42 +12,81 @@ Session::Session(const std::string& sessionId)
 }
 
 void Session::set(const std::string& key, const std::string& value) {
+    std::lock_guard<std::mutex> lk(mutex_);
     data_[key] = value;
-    touch();
+    touchLocked();
 }
 
-const std::string& Session::get(const std::string& key) const {
-    static const std::string empty;
+std::string Session::get(const std::string& key) const {
+    std::lock_guard<std::mutex> lk(mutex_);
     auto it = data_.find(key);
-    return (it != data_.end()) ? it->second : empty;
+    return (it != data_.end()) ? it->second : std::string();
 }
 
 bool Session::has(const std::string& key) const {
+    std::lock_guard<std::mutex> lk(mutex_);
     return data_.find(key) != data_.end();
 }
 
 void Session::remove(const std::string& key) {
+    std::lock_guard<std::mutex> lk(mutex_);
     data_.erase(key);
-    touch();
+    touchLocked();
 }
 
 void Session::touch() {
+    std::lock_guard<std::mutex> lk(mutex_);
+    touchLocked();
+}
+
+void Session::touchLocked() {
     lastAccessTime_ = std::chrono::system_clock::now();
 }
 
 bool Session::isExpired() const {
+    std::lock_guard<std::mutex> lk(mutex_);
     auto now = std::chrono::system_clock::now();
     auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(now - lastAccessTime_);
     return elapsed >= expirationTime_;
 }
 
+std::chrono::system_clock::time_point Session::getLastAccessTime() const {
+    std::lock_guard<std::mutex> lk(mutex_);
+    return lastAccessTime_;
+}
+
+void Session::setLastAccessTime(std::chrono::system_clock::time_point t) {
+    std::lock_guard<std::mutex> lk(mutex_);
+    lastAccessTime_ = t;
+}
+
 void Session::setExpirationTime(std::chrono::seconds expirationTime) {
+    std::lock_guard<std::mutex> lk(mutex_);
     expirationTime_ = expirationTime;
 }
 
+std::chrono::seconds Session::getExpirationTime() const {
+    std::lock_guard<std::mutex> lk(mutex_);
+    return expirationTime_;
+}
+
+std::chrono::seconds Session::remainingTime() const {
+    std::lock_guard<std::mutex> lk(mutex_);
+    auto now = std::chrono::system_clock::now();
+    auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(now - lastAccessTime_);
+    auto rem = expirationTime_ - elapsed;
+    return rem.count() > 0 ? rem : std::chrono::seconds(0);
+}
+
+Session::DataMap Session::getData() const {
+    std::lock_guard<std::mutex> lk(mutex_);
+    return data_;
+}
+
 void Session::clear() {
+    std::lock_guard<std::mutex> lk(mutex_);
     data_.clear();
-    touch();
+    touchLocked();
 }
 
 std::string Session::generateSessionId() {

@@ -24,6 +24,13 @@ void SessionMiddleware::operator()(const http::HttpRequest& request, http::HttpR
         // 创建新会话
         session = sessionManager_->createSession();
         setSessionCookie(response, session->getId(), session->getExpirationTime());
+    } else {
+        // 已存在的会话：服务端已经滑动续期（getSession 内部 touch），
+        // Cookie 必须一起刷新，否则会出现"服务端会话还活着、浏览器 cookie 已过期"
+        // 导致会话提前丢失（M12）。Max-Age 用剩余有效期。
+        auto remaining = session->remainingTime();
+        if (remaining.count() <= 0) remaining = session->getExpirationTime();
+        setSessionCookie(response, session->getId(), remaining);
     }
     
     // 将会话添加到请求上下文中
