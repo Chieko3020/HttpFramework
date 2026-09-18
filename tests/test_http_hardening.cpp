@@ -476,92 +476,133 @@ static bool test_payload_too_large() {
     return true;
 }
 
-// ── C2：陈旧 fd 跨连接误杀 ──
-// 时序（idle=1s，timerfd 固定 5s 一轮）：c1 发出 6s 的慢请求 → 越过 t=5s 空闲
-// 检查点后 c1 已被关闭（fd 归还内核）、worker 仍在途 → c2 复用该 fd 号并落在
-// 另一个 subReactor → 旧 worker 结束时不得关闭 c2。
+// ── C2：陈旧 fd 跨连接误杀（确定性命中版本）──
+// 旧版本依赖"客户端 fd 号 c2 == c1"这个代理判据，命中与否由内核决定，时常跳过。
+// 这里改用连接观测钩子拿到**服务端侧**的 fd：服务端关闭 c1 后，下一个 accept
+// 必然复用同一个 fd 号（Linux 分配最低可用 fd），因此命中是确定的。
+//
+// 时序（RST 让"带在途 worker 的连接被关闭"成为确定事件）：
+//   c1 发 GET /slowms?ms=4000 → 客户端 SO_LINGER(0)+close 触发 RST
+//   → 服务端 recv 得到 ECONNRESET，立刻关闭该连接（fd 归还内核，worker 仍在途）
+//   → c2 紧接着连接，服务端复用刚归还的 fd 号
+//   → 4s 后 c1 的 worker 完成、按旧代际投递响应：必须被代际校验丢弃
+//     （stats.staleCallbacksDropped++），绝不能关闭 c2。
 static bool test_stale_fd_no_crosstalk() {
-    TEST("C2 空闲超时关闭的连接，其 fd 号被复用后不被旧 worker 误杀");
+    TEST("C2 陈旧 fd 的响应投递必须被丢弃，复用了该 fd 的新连接不被误杀");
     Fixture f;
-    if (!f.up(/*idleSec=*/1, /*subReactors=*/2, false, 4)) FAIL("服务器启动失败");
+    if (!f.up(/*idleSec=*/60, /*subReactors=*/1, false, 4)) FAIL("服务器启动失败");
 
-    const int kMaxAttempts = 3;
-    bool hit = false;      // 是否真的观测到 fd 号复用
-    bool killed = false;
-    int reused = 0;
-    int attempts = 0;
+    std::mutex obsMu;
+    std::vector<std::pair<int, bool>> events;   // (fd, opened)
+    f.server->setConnectionObserver([&](int fd, bool opened) {
+        std::lock_guard<std::mutex> lk(obsMu);
+        events.push_back({fd, opened});
+    });
 
-    for (; attempts < kMaxAttempts && !killed; ++attempts) {
-        // 用一个"哨兵"连接占住低位 fd 号：c1 关闭后，c2 必然拿到同一个号
-        int sentinel = connectTo(f.port);
-        if (sentinel >= 0) {
-            sendAll(sentinel, req("GET", "/small"));
-            readResponse(sentinel, 3000);
+    const uint64_t stale0 = f.server->getStatistics().staleCallbacksDropped.load();
+
+    // ① c1 一次写入两个请求：R1 立刻响应（写完会重新武装 EPOLLIN 并派发 R2），
+    //    R2 是 4s 的慢请求 → 形成"读事件已武装 + 有一个在途 worker"的状态。
+    //    这正是 C2 的窗口：此时连接被关闭（fd 归还）而 worker 仍在途，是最难命中、
+    //    也最容易发生"陈旧回调误杀新连接"的时刻。
+    int c1 = connectTo(f.port);
+    CHECK(c1 >= 0, "连接失败");
+    CHECK(sendAll(c1, req("GET", "/small") + req("GET", "/slowms?ms=4000")),
+          "发送失败");
+
+    int serverFd1 = -1;
+    for (int i = 0; i < 300 && serverFd1 < 0; ++i) {
+        // 注意：不能在持锁时 sleep —— 观测回调也抢这把锁，
+        // 持锁睡眠会把 accept 线程一起卡住（本用例第一版就是这么"观测不到"的）
+        {
+            std::lock_guard<std::mutex> lk(obsMu);
+            for (auto& e : events) if (e.second) serverFd1 = e.first;
         }
+        if (serverFd1 < 0) std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    CHECK(serverFd1 > 0, "未观测到 c1 的服务端 fd");
 
-        int c1 = connectTo(f.port);
-        if (c1 < 0) { if (sentinel >= 0) close(sentinel); continue; }
-        if (!sendAll(c1, req("GET", "/slow"))) {
-            close(c1);
-            if (sentinel >= 0) close(sentinel);
-            continue;
-        }
-
-        // 越过服务端 timerfd 的 5s 空闲检查点：c1 已被服务端关闭、worker 仍在途
-        std::this_thread::sleep_for(std::chrono::milliseconds(5000));
-
-        // 客户端同步关掉 c1（服务端已关闭，这里只是把本进程的 fd 号还给内核），
-        // 紧接着新建连接即可命中同一个 fd 号——这正是 C2 的触发条件
-        close(c1);
-        int c2 = connectTo(f.port);
-        if (sentinel >= 0) { close(sentinel); sentinel = -1; }
-        if (c2 < 0) continue;
-        if (!sendAll(c2, req("GET", "/small"))) { close(c1); close(c2); continue; }
+    // R1 的响应必须已经回来（证明 R2 已派发、EPOLLIN 已重新武装）
+    {
         std::string carry;
-        auto r = readResponseImpl(c2, carry, 4000);
-        if (!(r.complete && r.body == "SMALL")) {
-            std::cout << "(第 " << (attempts + 1) << " 轮 c2 首个响应异常: "
-                      << r.status << ") ";
-            close(c2);
-            continue;
-        }
+        auto r1 = readResponseImpl(c1, carry, 3000);
+        CHECK(r1.complete && r1.body == "SMALL", "R1 响应异常: " << r1.status);
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
 
-        // 覆盖旧 worker 结束时刻（c1 连接后 6s，约在此处再等 1s），持续复用 c2
-        int roundReused = 0;
-        bool roundKilled = false;
-        for (int i = 0; i < 16; ++i) {
-            if (peekClosed(c2)) { roundKilled = true; break; }
-            if (!sendAll(c2, req("GET", "/small"))) { roundKilled = peekClosed(c2); break; }
-            auto r2 = readResponseImpl(c2, carry, 2000);
-            if (!(r2.complete && r2.body == "SMALL")) { roundKilled = true; break; }
-            ++roundReused;
-            std::this_thread::sleep_for(std::chrono::milliseconds(100));
-        }
-
-        // 命中判据：c2 拿到了 c1 刚归还的同一个 fd 号。
-        // 不命中时本用例无法判定（fd 号是否复用由内核决定），按跳过处理并打印
-        // 实际取值以便排查；跨 reactor 的完整复现见 verify 脚本 c2_final.py。
-        if (c2 == c1) {
-            hit = true;
-            reused += roundReused;
-            if (roundKilled) killed = true;
-        }
-        close(c2);
+    // ② RST 断开：服务端读事件已武装，会立刻读到 ECONNRESET 并关闭连接
+    //    （此时 R2 的 worker 仍在途中，约 4s 后才结束）
+    {
+        struct linger lg;
+        lg.l_onoff = 1;
+        lg.l_linger = 0;
+        setsockopt(c1, SOL_SOCKET, SO_LINGER, &lg, sizeof(lg));
+        close(c1);
     }
 
-    std::cout << "(轮数=" << attempts << " 命中 fd 复用=" << (hit ? "是" : "否")
-              << " 复用成功 " << reused << " 次) ";
+    bool closedSeen = false;
+    for (int i = 0; i < 300 && !closedSeen; ++i) {
+        {
+            std::lock_guard<std::mutex> lk(obsMu);
+            for (auto& e : events) if (!e.second && e.first == serverFd1) closedSeen = true;
+        }
+        if (!closedSeen) std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    CHECK(closedSeen, "服务端应在 R2 的 worker 结束前就关闭该连接（fd 归还）");
 
-    if (!hit) {
-        std::cout << "(本轮未复用到同一 fd 号，无法判定 — 跳过；"
-                     "完整复现见 c2_final.py) ";
-        f.down();
-        return true;
+    // c1 的关闭事件在事件序列中的位置：之后出现的第一个 opened=true 就是 c2
+    size_t closeIdx = events.size();
+    {
+        std::lock_guard<std::mutex> lk(obsMu);
+        for (size_t i = 0; i < events.size(); ++i) {
+            if (!events[i].second && events[i].first == serverFd1) closeIdx = i;
+        }
     }
 
-    CHECK(!killed, "c2 在旧 worker 完成时被单方面断开（陈旧 fd 误杀）");
-    CHECK(reused >= 5, "复用次数过少: " << reused);
+    // ③ c2 紧接着连接：服务端复用刚归还的 fd 号
+    int c2 = connectTo(f.port);
+    CHECK(c2 >= 0, "连接失败");
+    int serverFd2 = -1;
+    for (int i = 0; i < 300 && serverFd2 < 0; ++i) {
+        {
+            std::lock_guard<std::mutex> lk(obsMu);
+            for (size_t k = closeIdx + 1; k < events.size(); ++k) {
+                if (events[k].second) { serverFd2 = events[k].first; break; }
+            }
+        }
+        if (serverFd2 < 0) std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    std::cout << "(c1 服务端 fd=" << serverFd1 << ", c2 服务端 fd=" << serverFd2 << ") ";
+    CHECK(serverFd2 == serverFd1,
+          "本用例要求 c2 复用 c1 的 fd 号（服务端 fd=" << serverFd1
+              << ", c2=" << serverFd2 << "）；fd 号复用由内核决定，这里是确定性前提");
 
+    CHECK(sendAll(c2, req("GET", "/small")), "发送失败");
+    auto r0 = readResponse(c2, 3000);
+    CHECK(r0.complete && r0.body == "SMALL", "c2 首个响应异常: " << r0.status);
+
+    // ④ 跨越 c1 的 worker 结束时刻（连接后约 4s），持续复用 c2
+    int rounds = 0;
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    while (std::chrono::steady_clock::now() < deadline) {
+        if (peekClosed(c2, 10)) {
+            FAIL("c2 在陈旧 worker 完成时被误杀（陈旧 fd 写入路径关闭了已被复用的 fd）");
+        }
+        if (!sendAll(c2, req("GET", "/small"))) {
+            CHECK(peekClosed(c2, 50), "c2 发送失败但连接未关闭？");
+            FAIL("c2 连接在陈旧 worker 完成时被关闭");
+        }
+        auto r = readResponse(c2, 2000);
+        CHECK(r.complete && r.body == "SMALL", "c2 响应异常: " << r.status);
+        ++rounds;
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    }
+
+    const uint64_t stale1 = f.server->getStatistics().staleCallbacksDropped.load();
+    std::cout << "(复用期间完成 " << rounds << " 轮请求, 丢弃的陈旧回调="
+              << (stale1 - stale0) << ") ";
+
+    close(c2);
     f.down();
     PASS();
     return true;

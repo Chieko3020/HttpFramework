@@ -624,6 +624,8 @@ void HttpServer::handleAccept() {
 
         stats_.activeConnections.fetch_add(1);
 
+        if (connectionObserver_) connectionObserver_(clientFd, true);
+
         // M7：每连接两条日志走 Logger 的 Debug 级别（默认 Info 级别下完全不格式化、
         // 不落盘），热路径默认安静。
         if (Logger::isEnabled(LogLevel::Debug)) {
@@ -1063,10 +1065,14 @@ void HttpServer::handleWake(int subReactorIndex) {
         const int fd = net::connIdFd(item.connId);
         // 陈旧投递：该 (fd, 代际) 已不再属于本 reactor（连接已关闭、fd 被新连接复用、
         // 或被空闲超时清理）→ 直接丢弃，绝不能去 close 这个 fd 号（C2）
-        if (!ownsConnection(fd, subReactorIndex, item.connId)) continue;
+        if (!ownsConnection(fd, subReactorIndex, item.connId)) {
+            stats_.staleCallbacksDropped.fetch_add(1);
+            continue;
+        }
 
         HttpContext* ctx = lookupContext(subReactorIndex, fd);
         if (!ctx || ctx->connectionGeneration() != net::connIdGeneration(item.connId)) {
+            stats_.staleCallbacksDropped.fetch_add(1);
             continue;
         }
 
@@ -1182,6 +1188,7 @@ void HttpServer::closeConnectionId(net::ConnId connId) {
         }
         if (it->second.generation != net::connIdGeneration(connId)) {
             // 陈旧回调：该 fd 号已被新连接占用，或已归还给其它所有者 —— 不关
+            stats_.staleCallbacksDropped.fetch_add(1);
             return;
         }
         subReactorIndex = it->second.owner;
@@ -1213,6 +1220,8 @@ void HttpServer::closeConnectionId(net::ConnId connId) {
     close(fd);
 
     stats_.activeConnections.fetch_sub(1);
+
+    if (connectionObserver_) connectionObserver_(fd, false);
 
     if (Logger::isEnabled(LogLevel::Debug)) {
         LOG_DEBUG("HTTP服务器", "连接关闭 fd=" << fd << ", reactor: " << subReactorIndex);

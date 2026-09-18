@@ -2,6 +2,7 @@
 
 #include <memory>
 #include <atomic>
+#include <functional>
 #include <thread>
 #include <map>
 #include <unordered_map>
@@ -100,7 +101,16 @@ public:
         std::atomic<uint64_t> activeConnections{0};
         std::atomic<uint64_t> completedRequests{0};
         std::atomic<uint64_t> queuedTasks{0};
+        // 因连接代际不符而被丢弃的陈旧回调数（fd 已被新连接复用）：
+        // 用于观测 C2 的"陈旧 fd 误杀"防线是否真的被走到（测试与排障用）
+        std::atomic<uint64_t> staleCallbacksDropped{0};
     };
+
+    // 连接观测钩子（诊断/测试用）：opened=true 为 accept 建立连接、
+    // false 为连接关闭。回调在 I/O 线程执行，不得阻塞。
+    void setConnectionObserver(std::function<void(int fd, bool opened)> cb) {
+        connectionObserver_ = std::move(cb);
+    }
 
     // 统计读取口（L14）：
     //   - 每个字段都是 atomic，读取不会与请求线程竞争，但**不保证跨字段一致**：
@@ -187,6 +197,9 @@ private:
     int idleCheckIntervalSec_{5};
     // 最大并发连接数（L7）
     size_t maxConnections_{10000};
+
+    // 连接观测钩子（诊断/测试）
+    std::function<void(int fd, bool opened)> connectionObserver_;
 
     // 单请求体上限（M3）
     size_t maxRequestBodyBytes_{64u * 1024u * 1024u};
