@@ -227,7 +227,8 @@ struct WssFixture {
     std::mutex mu;
     std::condition_variable cv;
 
-    bool up(const std::string& cert, const std::string& key, const std::string& wsPath = "/echo") {
+    bool up(const std::string& cert, const std::string& key, const std::string& wsPath = "/echo",
+            int idleSec = 30) {
         port = pickPort();
         if (port == 0) return false;
         pool = std::make_unique<utils::ThreadPool>(4);
@@ -246,7 +247,7 @@ struct WssFixture {
             cv.notify_all();
         });
         reactor->setWsRouter(router);
-        reactor->setWsIdleTimeout(30);
+        reactor->setWsIdleTimeout(idleSec);   // 生效于 start()（见 test_setter_takes_effect）
         if (!reactor->start()) return false;
         std::this_thread::sleep_for(std::chrono::milliseconds(200));
         return true;
@@ -672,6 +673,52 @@ static bool test_router_plan_cache(const std::string& cert, const std::string& k
     return true;
 }
 
+// ④ 半开连接必须被空闲超时回收，且 setWsIdleTimeout() 必须真的生效。
+//
+// 两个已确认缺陷的判别用例：
+//   a) 心跳与空闲回收曾被合并进只遍历 activeFds（= 已握手连接）的循环，
+//      因此"只建 TCP、一个字节都不发"的连接既不进 activeFds、也不被任何回收
+//      路径触及 → 永远驻留（fd + SSL* 泄漏，slowloris 型耗尽）。
+//   b) setWsIdleTimeout() 只写 st.idleTimeoutSec，而 start() 用私有成员把它
+//      覆盖回默认 120s ⇒ setter 完全无效，WSS 超时相关用例全部假绿。
+// 本用例从客户端侧观测：设 idle=5s，建裸 TCP 连接，8s 内必须收到 EOF。
+static bool test_idle_reaps_unhandshaked_conn(const std::string& cert, const std::string& key) {
+    TEST("④ 未握手连接被空闲超时回收（setWsIdleTimeout 生效）");
+    WssFixture f;
+    if (!f.up(cert, key, "/echo", /*idleSec=*/5)) FAIL("WSS 服务启动失败");
+
+    int fd = ::socket(AF_INET, SOCK_STREAM, 0);
+    CHECK(fd >= 0, "创建 TCP socket 失败");
+    struct timeval tv;
+    tv.tv_sec = 1; tv.tv_usec = 0;
+    ::setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+    struct sockaddr_in a;
+    memset(&a, 0, sizeof(a));
+    a.sin_family = AF_INET;
+    a.sin_addr.s_addr = inet_addr("127.0.0.1");
+    a.sin_port = htons(static_cast<uint16_t>(f.port));
+    CHECK(::connect(fd, (struct sockaddr*)&a, sizeof(a)) == 0, "TCP 连接失败");
+
+    // 一个字节都不发：服务端既没完成 TLS 握手，也没升级。
+    // idle=5s（setter 下限）、定时器 1s 一轮 ⇒ 判定条件 now-last_ping > 5s，
+    // 因此最晚 t≈6s 应收到 EOF；给到 8s 的余量。旧实现恒不回收。
+    bool eof = false;
+    auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(8);
+    while (std::chrono::steady_clock::now() < deadline) {
+        char buf[64];
+        int n = ::recv(fd, buf, sizeof(buf), 0);
+        if (n == 0) { eof = true; break; }                       // 对端 close → EOF
+        if (n < 0 && errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR) { eof = true; break; }
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    }
+    ::close(fd);
+    f.down();
+
+    CHECK(eof, "半开连接应在 idle 超时后被回收（4s 内收到 EOF），实际一直保持");
+    PASS();
+    return true;
+}
+
 int main() {
     std::cout << "=== test_wss_hardening ===" << std::endl;
 
@@ -698,6 +745,7 @@ int main() {
     run(test_upgrade_header_limit,               "M18 升级头上限", cert, key);
     run(test_outbound_order_under_concurrency,   "③ 并发出站顺序", cert, key);
     run(test_router_plan_cache,                  "③ 路由计划缓存", cert, key);
+    run(test_idle_reaps_unhandshaked_conn,       "④ 半开连接空闲回收", cert, key);
 
     { int rc = system(("rm -f " + cert + " " + key).c_str()); (void)rc; }
 
