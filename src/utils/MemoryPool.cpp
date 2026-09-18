@@ -153,7 +153,10 @@ std::string PooledBuffer::readString(size_t len) {
 
 void PooledBuffer::clear() {
     if (block_) {
-        std::memset(block_->data, 0, BLOCK_SIZE);
+        // 仅重置已用长度：后续写入按 usedSize_ 定位、消费按 usedSize_ 判断边界，
+        // 不依赖数据被清零。原先的 12KB memset 在长连接下每请求触发两次
+        // （读完后 consume 全消费、响应发完后 resetForNextRequest），
+        // 等于每请求 24KB 的无效内存写入，是高并发下的纯浪费。
         usedSize_ = 0;
     }
 }
