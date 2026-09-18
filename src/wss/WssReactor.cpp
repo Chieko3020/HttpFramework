@@ -527,9 +527,11 @@ int advanceTlsHandshake(WssReactorState* st, std::shared_ptr<WssConnection> c,
 //      SSL_ERROR_WANT_WRITE 之后要求"用同样的指针与长度重试"，换地址或换长度
 //      会返回 SSL_R_BAD_WRITE_RETRY（error:0A00007F）。因此载荷放入
 //      shared_ptr<vector>（地址稳定），并且重试时传 item->data() + offset。
-//   2) 载荷不能是"栈上/本地拷贝"：队列元素可能在锁外被 pop_front() 释放
-//      （close() 清空队列），指针随即悬空。shared_ptr 让正在发送的那段字节
-//      独立于队列存活（本函数内的 sendItem 持有一份引用）。
+//   2) 载荷不能是"栈上/本地拷贝"：本函数在**锁外**使用载荷指针，而队首可能在
+//      本线程后续 pop_front() 时被释放（发送完成、或丢弃 data==nullptr 的项）。
+//      shared_ptr 让正在发送的那段字节独立于队列存活（payload 局部变量持有
+//      一份引用）。注意 close() 只是入队一个 Close 帧、**不清空**队列
+//      （关闭时队列里已有的帧仍会被发完），这里防的是本函数自己的弹出动作。
 //
 // 代价：sendBinary 每段多一次堆分配 + 拷贝（原先队列元素内联 vector 也要拷贝
 // 一次，差别只是多一层 shared_ptr 控制块）。换来的是 SSL_write 不再持

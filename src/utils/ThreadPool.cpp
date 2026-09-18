@@ -72,7 +72,12 @@ size_t ThreadPool::getQueueSize() const {
 
 // 与 enqueue 的唯一区别：不构造 packaged_task / future。
 // 任务体的异常由 workerFunction 统一捕获（与 enqueue 路径相同）。
+//
+// 空 std::function 必须挡在入队之前：worker 侧对空任务既不执行也不递减
+// activeTasks_（enqueue 路径永远非空 —— packaged_task 包装过），放进去就会
+// 让计数永久大于 0，waitForAllTasks() 再也等不到 tasks_.empty() && 计数==0。
 void ThreadPool::enqueueDetached(std::function<void()> task) {
+    if (!task) throw std::invalid_argument("enqueueDetached: empty task");
     {
         std::lock_guard<std::mutex> lock(queueMutex_);
         if (!running_.load()) {

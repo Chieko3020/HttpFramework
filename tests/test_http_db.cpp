@@ -14,6 +14,11 @@
 #include <iostream>
 #include <string>
 
+#include <arpa/inet.h>
+#include <netinet/in.h>
+#include <sys/socket.h>
+#include <unistd.h>
+
 #ifdef ENABLE_DATABASE
 #include "utils/db/DbConnectionPool.h"
 #include "utils/db/DbConnection.h"
@@ -184,6 +189,50 @@ static bool test_pool_available_count() {
     return true;
 }
 
+// T1：probeServer 必须认识主机名与 IPv6 —— 原来只认 IPv4 字面量，
+// host="localhost"/"::1" 一律被判"不可达"，lastInitError 误报 "TCP connect failed"。
+// 本用例不依赖 MySQL server：直接对一个刚建好的本地监听端口做探测。
+static bool test_probe_server_hostname() {
+    TEST("TCP 探测识别主机名/IPv6（不再把 localhost 判成不可达）");
+
+    int ls = ::socket(AF_INET, SOCK_STREAM, 0);
+    CHECK(ls >= 0, "创建监听 socket 失败");
+    int on = 1;
+    ::setsockopt(ls, SOL_SOCKET, SO_REUSEADDR, &on, sizeof(on));
+    struct sockaddr_in a;
+    memset(&a, 0, sizeof(a));
+    a.sin_family = AF_INET;
+    a.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    a.sin_port = 0;                       // 内核选端口
+    CHECK(::bind(ls, (struct sockaddr*)&a, sizeof(a)) == 0, "bind 失败");
+    CHECK(::listen(ls, 8) == 0, "listen 失败");
+    socklen_t alen = sizeof(a);
+    CHECK(::getsockname(ls, (struct sockaddr*)&a, &alen) == 0, "getsockname 失败");
+    const int port = ntohs(a.sin_port);
+
+    using PR = db::DbConnectionPool::ProbeResult;
+    const PR ipv4 = db::DbConnectionPool::probeServer("127.0.0.1", port);
+    const PR name = db::DbConnectionPool::probeServer("localhost", port);
+    const PR bogus = db::DbConnectionPool::probeServer("no-such-host.invalid", port);
+
+    std::cout << "(127.0.0.1=" << static_cast<int>(ipv4)
+              << " localhost=" << static_cast<int>(name)
+              << " bogus=" << static_cast<int>(bogus) << ") ";
+
+    CHECK(ipv4 == PR::Available, "127.0.0.1 应判为可连");
+    CHECK(name == PR::Available,
+          "localhost 应判为可连（修复前 inet_pton(AF_INET,\"localhost\") 失败 ⇒ 误判不可达）");
+    CHECK(bogus == PR::Unresolved,
+          "不可解析的主机名应判为 Unresolved（而不是伪装成 TCP connect failed）");
+
+    // 端口无人监听：仍是 Refused（不是 Unresolved）
+    const PR closed = db::DbConnectionPool::probeServer("127.0.0.1", port + 1);
+    CHECK(closed != PR::Unresolved, "已解析地址的关闭端口不应判为 Unresolved");
+    ::close(ls);
+    PASS();
+    return true;
+}
+
 #else  // !ENABLE_DATABASE
 
 // 数据库未编译时的桩测试
@@ -212,6 +261,7 @@ int main() {
     run(test_pool_get_connection,       "获取连接");
     run(test_pool_query,                "SQL 查询");
     run(test_pool_available_count,      "可用连接计数");
+    run(test_probe_server_hostname,     "TCP 探测主机名/IPv6");
 #else
     run(test_db_not_compiled, "数据库未编译");
 #endif

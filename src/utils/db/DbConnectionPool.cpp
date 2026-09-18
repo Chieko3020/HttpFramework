@@ -3,6 +3,7 @@
 #include <chrono>
 #include <cstring>
 #include <arpa/inet.h>
+#include <netdb.h>
 #include <netinet/in.h>
 #include <sys/socket.h>
 #include <sys/time.h>
@@ -24,28 +25,48 @@ DbConnectionPool::~DbConnectionPool() {
 
 namespace {
 
-// 只做 TCP 可连性探测（不建 MySQL 会话），用于区分"服务端不可达"与
-// "服务端可达但拒绝凭据/库"。1 秒超时，失败即返回 false。
-bool probeTcp(const std::string& host, int port) {
-    int fd = ::socket(AF_INET, SOCK_STREAM, 0);
-    if (fd < 0) return false;
-    struct timeval tv;
-    tv.tv_sec = 1;
-    tv.tv_usec = 0;
-    ::setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
-    ::setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
-    struct sockaddr_in addr;
-    std::memset(&addr, 0, sizeof(addr));
-    addr.sin_family = AF_INET;
-    addr.sin_port = htons(static_cast<uint16_t>(port));
-    bool ok = false;
-    if (::inet_pton(AF_INET, host.c_str(), &addr.sin_addr) == 1)
-        ok = (::connect(fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) == 0);
-    ::close(fd);
-    return ok;
+// ── TCP 可连性探测 ─────────────────────────────────────────────────
+// 结果三态：Reachable / Refused（连得上但被拒或超时）/ Unresolved（主机名或
+// 地址解析不了）。用它区分"服务端不可达"与"服务端可达但拒绝凭据/库"。
+//
+// 解析必须走 getaddrinfo：原来只认 IPv4 字面量（inet_pton(AF_INET,...)），
+// 于是 host="localhost" 或 "::1" 一律解析失败 ⇒ serverReachable=false ⇒
+// lastInitError 误报 "MySQL server unreachable (TCP connect failed)"，
+// 而 Connector/C++ 自己其实连得上（日志里就出现过 connecting to '::1:13306'）。
+using ProbeResult = DbConnectionPool::ProbeResult;
+
+ProbeResult probeTcp(const std::string& host, int port) {
+    struct addrinfo hints;
+    std::memset(&hints, 0, sizeof(hints));
+    hints.ai_family = AF_UNSPEC;        // 同时接受 IPv4 / IPv6
+    hints.ai_socktype = SOCK_STREAM;
+    struct addrinfo* res = nullptr;
+    const std::string portStr = std::to_string(port);
+    if (::getaddrinfo(host.c_str(), portStr.c_str(), &hints, &res) != 0 || !res)
+        return ProbeResult::Unresolved;
+
+    ProbeResult result = ProbeResult::Refused;
+    for (struct addrinfo* ai = res; ai; ai = ai->ai_next) {
+        int fd = ::socket(ai->ai_family, ai->ai_socktype, ai->ai_protocol);
+        if (fd < 0) continue;
+        struct timeval tv;
+        tv.tv_sec = 1;                  // 1 秒超时（SO_SNDTIMEO 对 connect 有效）
+        tv.tv_usec = 0;
+        ::setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+        ::setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+        int rc = ::connect(fd, ai->ai_addr, static_cast<socklen_t>(ai->ai_addrlen));
+        ::close(fd);
+        if (rc == 0) { result = ProbeResult::Available; break; }
+    }
+    ::freeaddrinfo(res);
+    return result;
 }
 
 }  // namespace
+
+DbConnectionPool::ProbeResult DbConnectionPool::probeServer(const std::string& host, int port) {
+    return probeTcp(host, port);
+}
 
 bool DbConnectionPool::initialize() {
     std::lock_guard<std::mutex> lock(mutex_);
@@ -54,7 +75,9 @@ bool DbConnectionPool::initialize() {
         return true;   // 幂等（M13）
     }
 
-    serverReachable_ = probeTcp(host_, port_);
+    const ProbeResult probe = probeTcp(host_, port_);
+    serverReachable_ = (probe == ProbeResult::Available);
+    serverResolvable_ = (probe != ProbeResult::Unresolved);
     lastInitError_.clear();
 
     try {
@@ -70,9 +93,16 @@ bool DbConnectionPool::initialize() {
         }
         
         if (availableConnections_.empty()) {
-            lastInitError_ = serverReachable_
-                ? "server reachable but MySQL rejected connection (credentials/schema)"
-                : "MySQL server unreachable (TCP connect failed)";
+            // 三态文案：不可达 / 主机解析不了 / 可达但被拒。
+            // 不要把"解析失败"说成 "TCP connect failed" —— 那会把 host="localhost"
+            // 或 IPv6 误诊成网络不通（Connector 自己能解析，日志里会出现真实地址）。
+            if (!serverResolvable_) {
+                lastInitError_ = "MySQL host cannot be resolved or probed: " + host_;
+            } else if (serverReachable_) {
+                lastInitError_ = "server reachable but MySQL rejected connection (credentials/schema)";
+            } else {
+                lastInitError_ = "MySQL server unreachable (TCP connect failed)";
+            }
             std::cerr << "[ERROR][数据库]：所有数据库连接创建失败 (" << lastInitError_ << ")"
                       << std::endl;
             return false;

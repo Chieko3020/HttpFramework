@@ -80,8 +80,17 @@ public:
     // "服务端连不上"与"服务端可达但凭据/库被拒" —— 两者都返回 false，
     // 但含义完全不同（测试用例此前无法区分，属"因错误的原因通过"）。
     const std::string& lastInitError() const { return lastInitError_; }
-    // 服务端是否可达（TCP 3306 能否连上）；initialize() 会更新该值
+    // 服务端是否可达（TCP 端口能否连上；走 getaddrinfo，支持主机名与 IPv6）。
+    // initialize() 会更新该值。
     bool serverReachable() const { return serverReachable_; }
+    // 主机名/地址能否解析（getaddrinfo 成功）。解析失败时 lastInitError() 报的是
+    // "无法解析/探测"，而不是误导性的 "TCP connect failed"。
+    bool serverResolvable() const { return serverResolvable_; }
+
+    // 无副作用的 TCP 探测结果（不建 MySQL 会话、不改连接池状态）：
+    // available / refused（连得上但被拒或超时）/ unresolved（主机名解析失败）。
+    enum class ProbeResult { Available, Refused, Unresolved };
+    static ProbeResult probeServer(const std::string& host, int port);
 
     // 健康检查（只检查空闲连接：借出中的连接归业务线程所有，
     // MySQL Connector/C++ 的 Connection 不是线程安全的）（M13）
@@ -106,6 +115,7 @@ private:
     std::atomic<bool> initialized_{false};
     std::string lastInitError_;
     bool serverReachable_{false};
+    bool serverResolvable_{true};
 
     // 创建新连接
     std::shared_ptr<DbConnection> createConnection();

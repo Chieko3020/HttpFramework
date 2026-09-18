@@ -6,8 +6,10 @@
 #include <iostream>
 #include <chrono>
 #include <atomic>
+#include <thread>
 #include <vector>
 #include <string>
+#include <stdexcept>
 
 #define TEST(name) std::cout << "  [测试] " << name << "... "
 #define PASS() std::cout << "通过" << std::endl
@@ -193,6 +195,47 @@ static bool test_enqueue_detached() {
     return true;
 }
 
+// T2：空 std::function 必须被拒绝 —— worker 对空任务既不执行也不递减
+// activeTasks_，放进去会让计数永不清零、waitForAllTasks() 永久阻塞。
+// 判别力：把 enqueueDetached 的 !task 检查摘掉，本用例的 waitForAllTasks()
+// 会卡在 3s 看门狗上（实机验证：watchdog _exit(42)）。
+static bool test_enqueue_detached_rejects_empty() {
+    TEST("enqueueDetached 空任务被拒且 waitForAllTasks 仍能收敛");
+    utils::ThreadPool pool(2);
+
+    std::atomic<int> ran{0};
+    pool.enqueueDetached([&ran]() { ran.fetch_add(1); });
+
+    std::function<void()> empty;
+    bool threw = false;
+    try {
+        pool.enqueueDetached(empty);
+    } catch (const std::invalid_argument&) {
+        threw = true;
+    }
+    CHECK(threw, "空 std::function 应抛 std::invalid_argument");
+    CHECK(pool.getQueueSize() == 0, "被拒的任务不应进入队列, 实际 " << pool.getQueueSize());
+
+    // 看门狗：3s 还没等到计数归零即判失败（不能真挂死测试进程）
+    std::atomic<bool> done{false};
+    std::thread watchdog([&done]() {
+        for (int i = 0; i < 30 && !done.load(); ++i)
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        if (!done.load()) {
+            std::cerr << "\n[看门狗] waitForAllTasks 3s 未返回 → activeTasks_ 记账泄漏 " << std::flush;
+            std::_Exit(97);
+        }
+    });
+    pool.waitForAllTasks();
+    done.store(true);
+    watchdog.join();
+
+    CHECK(ran.load() == 1, "正常任务应执行一次, 实际 " << ran.load());
+    pool.shutdown();
+    PASS();
+    return true;
+}
+
 int main() {
     std::cout << "=== test_infra_threadpool ===" << std::endl;
 
@@ -211,6 +254,7 @@ int main() {
     run(test_wait_for_all_tasks,     "等待全部任务完成");
     run(test_get_thread_count,       "获取线程数");
     run(test_enqueue_detached,       "enqueueDetached 提交");
+    run(test_enqueue_detached_rejects_empty, "enqueueDetached 空任务");
 
     std::cout << std::endl
               << "结果: " << g_testsPassed << " 通过, "
