@@ -82,11 +82,16 @@ public:
     // 单条消息（分片重组后）的累计上限（HTTPFW_WSS_MAX_MESSAGE_BYTES，默认同上）。
     // 只有单帧上限时，攻击者可以用"多个刚好合规的分片"把进程内存耗尽（H12）。
     static std::size_t maxMessageLimit();
+    // 升级请求头部上限（HTTPFW_WSS_MAX_UPGRADE_BYTES，默认 16KB）：
+    // 升级成功前不接受无界喂数据（M18）
+    static std::size_t maxUpgradeHeaderLimit();
 
 private:
     State state_{State::AwaitingHttpUpgrade};
     std::vector<uint8_t> buffer_;
     std::size_t parse_offset_{0};
+    // 升级头扫描的续扫位置：避免每次 feed 都从头 O(n) 重扫（整体 O(n²)）（M18）
+    std::size_t upgrade_scan_pos_{0};
     bool require_mask_{true};
     bool enforce_nonce_{false};
     bool in_fragment_{false};

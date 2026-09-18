@@ -24,9 +24,36 @@ namespace {
 
 const char* kGuid = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
 
+// RFC 3629 UTF-8 校验（拒绝过长编码、代理区、>U+10FFFF）（L9）
+bool isValidUtf8(const uint8_t* p, std::size_t n) {
+    std::size_t i = 0;
+    while (i < n) {
+        uint8_t c = p[i];
+        std::size_t extra;
+        uint32_t cp;
+        if (c < 0x80) { ++i; continue; }
+        else if ((c & 0xE0u) == 0xC0u) { extra = 1; cp = c & 0x1Fu; if (cp == 0) return false; }
+        else if ((c & 0xF0u) == 0xE0u) { extra = 2; cp = c & 0x0Fu; }
+        else if ((c & 0xF8u) == 0xF0u) { extra = 3; cp = c & 0x07u; }
+        else return false;
+        if (i + extra >= n) return false;
+        for (std::size_t k = 1; k <= extra; ++k) {
+            if ((p[i + k] & 0xC0u) != 0x80u) return false;
+            cp = (cp << 6) | (p[i + k] & 0x3Fu);
+        }
+        // 过长编码 / 代理区 / 超出 Unicode 范围
+        if ((extra == 1 && cp < 0x80) || (extra == 2 && cp < 0x800) ||
+            (extra == 3 && cp < 0x10000) || cp > 0x10FFFF || (cp >= 0xD800 && cp <= 0xDFFF))
+            return false;
+        i += extra + 1;
+    }
+    return true;
+}
+
 std::string base64Encode(const unsigned char* input, int len) {
     std::string out;
-    out.resize(static_cast<std::size_t>(4 * ((len + 2) / 3)));
+    // EVP_EncodeBlock 会写 outLen+1 字节（末尾 NUL），缓冲必须多留 1 字节（L9）
+    out.resize(static_cast<std::size_t>(4 * ((len + 2) / 3) + 1));
     int outLen = EVP_EncodeBlock(reinterpret_cast<unsigned char*>(&out[0]), input, len);
     out.resize(static_cast<std::size_t>(outLen));
     return out;
@@ -80,6 +107,19 @@ std::size_t WebSocketStreamParser::maxMessageLimit() {
     if (cached != 0) return cached;
     cached = maxPayloadLimit();   // 默认与单帧上限一致
     const char* v = std::getenv("HTTPFW_WSS_MAX_MESSAGE_BYTES");
+    if (!v) return cached;
+    try {
+        std::size_t parsed = static_cast<std::size_t>(std::stoul(v));
+        if (parsed >= 1024) cached = parsed;
+    } catch (...) {}
+    return cached;
+}
+
+std::size_t WebSocketStreamParser::maxUpgradeHeaderLimit() {
+    static std::size_t cached = 0;
+    if (cached != 0) return cached;
+    cached = 16 * 1024;
+    const char* v = std::getenv("HTTPFW_WSS_MAX_UPGRADE_BYTES");
     if (!v) return cached;
     try {
         std::size_t parsed = static_cast<std::size_t>(std::stoul(v));
@@ -235,27 +275,78 @@ bool WebSocketStreamParser::tryConsumeUpgrade(std::string* outAcceptResponse) {
     static const std::string kCRLFCRLF = "\r\n\r\n";
     if (buffer_.size() < kCRLFCRLF.size()) return false;
 
+    // 从上次扫到的位置续扫（回退 3 字节以覆盖跨批次的 CRLFCRLF），
+    // 否则每次 feed 都从头重扫，大头部场景是 O(n²)（M18）
+    std::size_t start = upgrade_scan_pos_ > 3 ? upgrade_scan_pos_ - 3 : 0;
+    if (start + kCRLFCRLF.size() > buffer_.size()) start = 0;
     std::size_t endPos = std::string::npos;
-    for (std::size_t i = 0; i + kCRLFCRLF.size() <= buffer_.size(); ++i) {
+    for (std::size_t i = start; i + kCRLFCRLF.size() <= buffer_.size(); ++i) {
         if (buffer_[i] == '\r' && buffer_[i + 1] == '\n' &&
             buffer_[i + 2] == '\r' && buffer_[i + 3] == '\n') {
             endPos = i + kCRLFCRLF.size();
             break;
         }
     }
-    if (endPos == std::string::npos) return false;
+    if (endPos == std::string::npos) {
+        upgrade_scan_pos_ = buffer_.size();
+        return false;
+    }
 
     std::string headerBlock(reinterpret_cast<const char*>(buffer_.data()),
                             reinterpret_cast<const char*>(buffer_.data() + endPos));
 
+    // 请求行必须是 GET（RFC 6455 §4.1）（L9）
+    {
+        auto lineEnd = headerBlock.find("\r\n");
+        std::string requestLine = headerBlock.substr(0, lineEnd);
+        if (requestLine.rfind("GET ", 0) != 0)
+            throw WsProtocolError("WebSocket upgrade must use GET", 1002);
+    }
+
     std::string secKey;
     if (!findHeaderValue(headerBlock, "Sec-WebSocket-Key", &secKey))
-        throw std::runtime_error("Missing Sec-WebSocket-Key");
-    if (secKey.empty()) throw std::runtime_error("Empty Sec-WebSocket-Key");
+        throw WsProtocolError("Missing Sec-WebSocket-Key", 1002);
+    if (secKey.empty()) throw WsProtocolError("Empty Sec-WebSocket-Key", 1002);
 
     std::string upgrade;
     if (!findHeaderValue(headerBlock, "Upgrade", &upgrade) || toLower(upgrade) != "websocket")
-        throw std::runtime_error("Invalid Upgrade header");
+        throw WsProtocolError("Invalid Upgrade header", 1002);
+
+    // Connection 头必须包含 upgrade（逐 token 判断，容忍 "keep-alive, Upgrade"）（L9）
+    {
+        std::string conn;
+        if (!findHeaderValue(headerBlock, "Connection", &conn))
+            throw WsProtocolError("Missing Connection header", 1002);
+        conn = toLower(conn);
+        bool hasUpgrade = false;
+        std::size_t pos = 0;
+        while (pos <= conn.size()) {
+            auto comma = conn.find(',', pos);
+            std::string token = conn.substr(
+                pos, comma == std::string::npos ? std::string::npos : comma - pos);
+            while (!token.empty() && (token.front() == ' ' || token.front() == '\t'))
+                token.erase(token.begin());
+            while (!token.empty() && (token.back() == ' ' || token.back() == '\t' ||
+                                      token.back() == '\r'))
+                token.pop_back();
+            if (token == "upgrade") { hasUpgrade = true; break; }
+            if (comma == std::string::npos) break;
+            pos = comma + 1;
+        }
+        if (!hasUpgrade)
+            throw WsProtocolError("Connection header must contain upgrade", 1002);
+    }
+
+    // Sec-WebSocket-Version 必须是 13（L9）
+    {
+        std::string ver;
+        if (!findHeaderValue(headerBlock, "Sec-WebSocket-Version", &ver))
+            throw WsProtocolError("Missing Sec-WebSocket-Version", 1002);
+        while (!ver.empty() && (ver.back() == ' ' || ver.back() == '\t' || ver.back() == '\r'))
+            ver.pop_back();
+        if (ver != "13")
+            throw WsProtocolError("Unsupported Sec-WebSocket-Version", 1002);
+    }
 
     if (enforce_nonce_) {
         std::string nonce;
@@ -286,6 +377,12 @@ bool WebSocketStreamParser::feed(const uint8_t* data, std::size_t len,
 
     outAcceptResponse->clear();
     if (len > 0) buffer_.insert(buffer_.end(), data, data + len);
+
+    // 升级头长度上限：升级成功前不接受无界喂数据（M18）
+    if (state_ == State::AwaitingHttpUpgrade &&
+        buffer_.size() > maxUpgradeHeaderLimit()) {
+        throw WsProtocolError("Upgrade header too large", 1002);
+    }
 
     bool producedAccept = false;
 
@@ -328,12 +425,19 @@ bool WebSocketStreamParser::feed(const uint8_t* data, std::size_t len,
             payload_len = (static_cast<uint64_t>(buffer_[idx]) << 8) |
                           static_cast<uint64_t>(buffer_[idx + 1]);
             idx += 2;
+            // RFC 6455 §5.2：必须用最短编码（<=125 的值不得用 126 编码）（L9）
+            if (payload_len <= 125)
+                throw WsProtocolError("Non-minimal payload length encoding", 1002);
         } else if (payload_len == 127) {
             if (buffer_.size() - idx < 8) break;
+            bool highBit = (buffer_[idx] & 0x80u) != 0;
             payload_len = 0;
             for (int i = 0; i < 8; ++i)
                 payload_len = (payload_len << 8) | static_cast<uint64_t>(buffer_[idx + i]);
             idx += 8;
+            // 最高位必须为 0（RFC 6455 §5.2），且同样要求最短编码
+            if (highBit || payload_len <= 0xFFFFu)
+                throw WsProtocolError("Non-minimal payload length encoding", 1002);
         }
 
         if (payload_len > kMaxPayload)
@@ -373,6 +477,9 @@ bool WebSocketStreamParser::feed(const uint8_t* data, std::size_t len,
                 throw WsProtocolError("Fragmented message too large", 1009);
             fragment_payload_.insert(fragment_payload_.end(), payload.begin(), payload.end());
             if (fin) {
+                if (fragment_opcode_ == 0x1 &&
+                    !isValidUtf8(fragment_payload_.data(), fragment_payload_.size()))
+                    throw WsProtocolError("Invalid UTF-8 in fragmented text message", 1007);
                 WsFrame f;
                 f.opcode = fragment_opcode_;
                 f.fin = true;
@@ -389,6 +496,8 @@ bool WebSocketStreamParser::feed(const uint8_t* data, std::size_t len,
             if (in_fragment_)
                 throw WsProtocolError("New data frame while fragmented", 1002);
             if (fin) {
+                if (opcode == 0x1 && !isValidUtf8(payload.data(), payload.size()))
+                    throw WsProtocolError("Invalid UTF-8 in text frame", 1007);
                 WsFrame f;
                 f.opcode = opcode;
                 f.fin = true;
@@ -408,6 +517,9 @@ bool WebSocketStreamParser::feed(const uint8_t* data, std::size_t len,
         if (opcode == 0x8 || opcode == 0x9 || opcode == 0xA) {
             if (opcode == 0x8 && payload.size() == 1)
                 throw WsProtocolError("Invalid close payload length", 1002);
+            if (opcode == 0x8 && payload.size() > 2 &&
+                !isValidUtf8(payload.data() + 2, payload.size() - 2))
+                throw WsProtocolError("Invalid UTF-8 in close reason", 1007);
             if (opcode == 0x8 && payload.size() >= 2) {
                 uint16_t code = static_cast<uint16_t>((payload[0] << 8) | payload[1]);
                 // RFC 6455 §7.4.1：非法/保留关闭码要以 1002 关闭（L9）

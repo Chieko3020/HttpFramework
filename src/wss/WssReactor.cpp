@@ -91,6 +91,9 @@ namespace {
 // 关闭帧发出后允许的最长滞留时间：到期强制 close(fd)
 constexpr auto kCloseGrace = std::chrono::milliseconds(1000);
 
+// 升级请求前缀（只需请求行）的保留上限
+constexpr std::size_t kPreUpgradePrefixBytes = 4096;
+
 bool isValidCloseCode(uint16_t code) {
     if (code < 1000 || code >= 5000) return false;
     if (code == 1004 || code == 1005 || code == 1006 || code == 1015) return false;
@@ -274,9 +277,13 @@ bool processWsInboundBuffer(WssReactorState* st, int fd,
     std::string acceptResp;
     std::vector<WsFrame> frames;
 
-    // 跨 TLS 记录累积升级数据，升级完成后提取请求路径
-    if (!c->state.ws_upgraded) {
-        c->state.preUpgradeBuf.insert(c->state.preUpgradeBuf.end(), buf, buf + ret);
+    // 跨 TLS 记录累积升级数据，升级完成后提取请求路径。
+    // 只需要请求行（最多 4KB），因此这里设上限：原先无界累积等于把升级前的
+    // 每个字节都存了两份（解析器一份 + 这里一份）（M18）。
+    if (!c->state.ws_upgraded && c->state.preUpgradeBuf.size() < kPreUpgradePrefixBytes) {
+        std::size_t room = kPreUpgradePrefixBytes - c->state.preUpgradeBuf.size();
+        std::size_t take = std::min(room, static_cast<std::size_t>(ret));
+        c->state.preUpgradeBuf.insert(c->state.preUpgradeBuf.end(), buf, buf + take);
     }
 
     try {

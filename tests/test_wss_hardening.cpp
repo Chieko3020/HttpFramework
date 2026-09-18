@@ -395,6 +395,101 @@ static bool test_on_close_abnormal(const std::string& cert, const std::string& k
     return true;
 }
 
+// L9b：非法 UTF-8 文本帧必须以 1007 关闭；非最短长度编码必须以 1002 关闭
+static bool test_l9_payload_checks(const std::string& cert, const std::string& key) {
+    TEST("L9 非法 UTF-8 → 1007；非最短长度编码 → 1002");
+
+    // 非法 UTF-8 文本帧
+    {
+        WssFixture f;
+        if (!f.up(cert, key)) FAIL("WSS 服务启动失败");
+        TlsClient c;
+        CHECK(c.connect(f.port), "TLS 连接失败");
+        CHECK(c.writeAll(wsUpgradeRequest("/echo")), "发送升级请求失败");
+        bool got = false;
+        std::string head = c.readHttpHeader(&got);
+        CHECK(got && head.rfind("HTTP/1.1 101", 0) == 0, "升级失败");
+        // 0xFF 不是合法的 UTF-8 起始字节
+        CHECK(c.writeAll(buildClientFrameRaw(0x1, std::string("\xff\xfe", 2), true)),
+              "发送非法 UTF-8 帧失败");
+        uint8_t opcode = 0;
+        std::string payload;
+        const bool gotFrame = readServerFrame(c, &opcode, &payload, 3000);
+        uint16_t code = 0;
+        if (gotFrame && opcode == 0x8 && payload.size() >= 2)
+            code = static_cast<uint16_t>((static_cast<uint8_t>(payload[0]) << 8) |
+                                         static_cast<uint8_t>(payload[1]));
+        std::cout << "(utf8→opcode=0x" << std::hex << static_cast<int>(opcode) << std::dec
+                  << " code=" << code << ") ";
+        c.closeAll();
+        f.down();
+        CHECK(gotFrame && opcode == 0x8, "非法 UTF-8 应以 close 帧拒绝");
+        CHECK(code == 1007, "非法 UTF-8 的关闭码应为 1007, 实际 " << code);
+    }
+
+    // 非最短长度编码：把 2 字节 payload 用 126 形式编码
+    {
+        WssFixture f;
+        if (!f.up(cert, key)) FAIL("WSS 服务启动失败");
+        TlsClient c;
+        CHECK(c.connect(f.port), "TLS 连接失败");
+        CHECK(c.writeAll(wsUpgradeRequest("/echo")), "发送升级请求失败");
+        bool got = false;
+        std::string head = c.readHttpHeader(&got);
+        CHECK(got && head.rfind("HTTP/1.1 101", 0) == 0, "升级失败");
+
+        const std::string payload2 = "hi";
+        std::string frame;
+        frame.push_back(static_cast<char>(0x81));            // FIN + text
+        frame.push_back(static_cast<char>(0x80 | 126));      // masked + 2字节长度
+        frame.push_back(0x00);
+        frame.push_back(0x02);                               // 非最短编码
+        unsigned char mask[4] = {1, 2, 3, 4};
+        for (int i = 0; i < 4; ++i) frame.push_back(static_cast<char>(mask[i]));
+        for (size_t i = 0; i < payload2.size(); ++i)
+            frame.push_back(static_cast<char>(payload2[i] ^ mask[i % 4]));
+        CHECK(c.writeAll(frame), "发送非最短编码帧失败");
+
+        uint8_t opcode = 0;
+        std::string payload;
+        const bool gotFrame = readServerFrame(c, &opcode, &payload, 3000);
+        uint16_t code = 0;
+        if (gotFrame && opcode == 0x8 && payload.size() >= 2)
+            code = static_cast<uint16_t>((static_cast<uint8_t>(payload[0]) << 8) |
+                                         static_cast<uint8_t>(payload[1]));
+        std::cout << "(非最短→opcode=0x" << std::hex << static_cast<int>(opcode) << std::dec
+                  << " code=" << code << ") ";
+        c.closeAll();
+        f.down();
+        CHECK(gotFrame && opcode == 0x8, "非最短长度编码应以 close 帧拒绝");
+        CHECK(code == 1002, "非最短长度编码的关闭码应为 1002, 实际 " << code);
+    }
+
+    PASS();
+    return true;
+}
+
+// M18：升级头超过上限时拒绝（不再无界累积）
+static bool test_upgrade_header_limit(const std::string& cert, const std::string& key) {
+    TEST("M18 升级请求头超过 16KB 上限时拒绝");
+    WssFixture f;
+    if (!f.up(cert, key)) FAIL("WSS 服务启动失败");
+
+    TlsClient c;
+    CHECK(c.connect(f.port), "TLS 连接失败");
+    std::string req = wsUpgradeRequest("/echo", "X-Pad: " + std::string(32 * 1024, 'p') + "\r\n");
+    CHECK(c.writeAll(req), "发送超大升级请求失败");
+    bool got = false;
+    std::string head = c.readHttpHeader(&got);
+    const bool is101 = got && head.rfind("HTTP/1.1 101", 0) == 0;
+    std::cout << "(超大头部→" << (is101 ? "101" : "拒绝") << ") ";
+    c.closeAll();
+    f.down();
+    CHECK(!is101, "超过上限的升级请求不应被接受");
+    PASS();
+    return true;
+}
+
 // H12：分片累计超过上限必须以 1009 关闭
 static bool test_fragment_limit(const std::string& cert, const std::string& key) {
     TEST("H12 分片累计超上限（2×40KB > 64KB）以 1009 关闭");
@@ -454,6 +549,8 @@ int main() {
     run(test_on_close_fired,                     "H11 onClose（正常关闭）", cert, key);
     run(test_on_close_abnormal,                  "H11 onClose（异常断开）", cert, key);
     run(test_fragment_limit,                     "H12 分片累计上限", cert, key);
+    run(test_l9_payload_checks,                  "L9 UTF-8/长度编码", cert, key);
+    run(test_upgrade_header_limit,               "M18 升级头上限", cert, key);
 
     { int rc = system(("rm -f " + cert + " " + key).c_str()); (void)rc; }
 
