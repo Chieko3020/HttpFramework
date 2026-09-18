@@ -207,6 +207,75 @@ static bool test_request_body() {
     return true;
 }
 
+// 路由匹配计划的等价性回归：哈希精确匹配 + 分段匹配必须与"逐条 regex_match"
+// 给出相同的结论（本用例在旧实现上也应通过，用于保护优化后的匹配语义）
+static bool test_match_index_equivalence() {
+    TEST("哈希/分段匹配与线性正则语义等价");
+    router::Router router;
+
+    std::string hit;
+    auto mk = [&hit](const char* tag) {
+        return [&hit, tag](const http::HttpRequest& req, http::HttpResponse&) {
+            hit = std::string(tag);
+            auto it = req.getParams().find("id");
+            if (it != req.getParams().end()) hit += ":" + it->second;
+        };
+    };
+
+    // 注册顺序刻意让"动态路由在前、静态路由在后"
+    router.get("/users/:id", mk("dynamic"));
+    router.get("/users/me", mk("static"));
+    router.get("/a/:x/b/:y", mk("two"));
+
+    http::HttpRequest r1; r1.parse(makeRequest("GET", "/users/me"));
+    http::HttpResponse s1; router.handleRequest(r1, s1);
+    CHECK(hit == "static", "静态段与 :param 同名时静态路由应优先, 实际 '" << hit << "'");
+
+    hit.clear();
+    http::HttpRequest r2; r2.parse(makeRequest("GET", "/users/42"));
+    http::HttpResponse s2; router.handleRequest(r2, s2);
+    CHECK(hit == "dynamic:42", "动态路由应命中并提取参数, 实际 '" << hit << "'");
+
+    hit.clear();
+    http::HttpRequest r3; r3.parse(makeRequest("GET", "/a/1/b/2"));
+    http::HttpResponse s3; router.handleRequest(r3, s3);
+    CHECK(hit == "two", "两段参数路由应命中, 实际 '" << hit << "'");
+
+    // 段数不同不命中（旧正则 ^/a/([^/]+)/b/([^/]+)$ 亦不命中）
+    hit.clear();
+    http::HttpRequest r4; r4.parse(makeRequest("GET", "/a/1/b/2/c"));
+    http::HttpResponse s4; router.handleRequest(r4, s4);
+    CHECK(hit.empty(), "段数不同不应命中, 实际 '" << hit << "'");
+    CHECK(s4.getStatusCode() == 404, "应为 404, 实际 " << s4.getStatusCode());
+
+    // 空段 :param 不匹配（([^/]+) 语义）
+    hit.clear();
+    http::HttpRequest r5; r5.parse(makeRequest("GET", "/users//me"));
+    http::HttpResponse s5; router.handleRequest(r5, s5);
+    CHECK(hit != "dynamic", "空段不应被 :param 吞掉, 实际 '" << hit << "'");
+
+    // 重复注册同一静态路径：先注册者优先（与线性扫描一致）
+    router::Router dup;
+    std::string which;
+    dup.get("/same", [&](const http::HttpRequest&, http::HttpResponse&) { which = "first"; });
+    dup.get("/same", [&](const http::HttpRequest&, http::HttpResponse&) { which = "second"; });
+    http::HttpRequest r6; r6.parse(makeRequest("GET", "/same"));
+    http::HttpResponse s6; dup.handleRequest(r6, s6);
+    CHECK(which == "first", "重复注册应命中第一条, 实际 '" << which << "'");
+
+    // HEAD 回退到 GET（通过 methodIndex 的 GET 视图）
+    router::Router headRouter;
+    bool getCalled = false;
+    headRouter.get("/h", [&](const http::HttpRequest&, http::HttpResponse&) { getCalled = true; });
+    http::HttpRequest r7; r7.parse(makeRequest("HEAD", "/h"));
+    http::HttpResponse s7; headRouter.handleRequest(r7, s7);
+    CHECK(getCalled, "HEAD 应回退到 GET handler");
+    CHECK(s7.getStatusCode() == 200, "HEAD 回退应得到 200, 实际 " << s7.getStatusCode());
+
+    PASS();
+    return true;
+}
+
 static bool test_not_found_custom_handler() {
     TEST("自定义 404 handler 被调用");
     router::Router router;
@@ -244,6 +313,7 @@ int main() {
     run(test_dynamic_route_param_extraction, "动态路由参数提取");
     run(test_multiple_dynamic_params,      "多个动态参数");
     run(test_wildcard_route,               "通配符路由");
+    run(test_match_index_equivalence,      "匹配索引等价性");
     run(test_404_not_found,               "404 未找到");
     run(test_method_based_routing,         "方法分发");
     run(test_query_params,                 "查询参数");

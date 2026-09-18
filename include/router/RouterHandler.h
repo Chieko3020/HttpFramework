@@ -7,6 +7,8 @@
 #include <memory>
 #include <mutex>
 #include <regex>
+#include <cstddef>
+#include <cstdint>
 #include "http/HttpRequest.h"
 #include "http/HttpResponse.h"
 
@@ -18,7 +20,17 @@ struct Route {
     std::regex pathRegex;
     std::vector<std::string> paramNames;
     std::function<void(const http::HttpRequest&, http::HttpResponse&)> handler;
-    
+
+    // ── 一次性算好的匹配计划（见 Route 构造函数）──
+    // isStatic=true 时只做整串哈希比较；否则按 pathSegs 分段比较，
+    // 只有段内含正则元字符（即 '*' 通配）时才走 pathRegex。
+    std::vector<std::string> patternSegs;
+    // 段下标 → paramNames 的下标一致（pathToRegex 按出现顺序收集），
+    // 因此第 k 个动态段对应的参数名是 paramNames[k]。
+    std::vector<std::size_t> paramSegments;
+    bool isStatic{false};
+    bool needsRegex{false};
+
     Route(const std::string& method, const std::string& path, 
           std::function<void(const http::HttpRequest&, http::HttpResponse&)> handler);
 };
@@ -63,13 +75,28 @@ public:
     static std::pair<std::regex, std::vector<std::string>> pathToRegex(const std::string& path);
 
 private:
-    // 路由表 + 中间件链 + 兜底处理器的一整份快照
+    // 单个方法的路由视图：静态路径走哈希表，动态路径（含 :param 或 *）才回退正则。
+    // 指针指向 Table::routes 的元素，指向关系与 Table 的生命周期绑定（表是
+    // 不可变快照：mutate() 拷贝-修改-换入，从不原地修改已发布的表）。
+    struct MatchIndex {
+        // 静态路径（无 :param / *，模式与请求路径全等）→ routes 下标
+        std::unordered_map<std::string, std::size_t> exact;
+        // 动态路径下标，注册顺序（决定匹配优先级，与原线性扫描一致）
+        std::vector<std::size_t> dynamicRoutes;
+    };
+
+    // 路由表 + 匹配索引 + 中间件链 + 兜底处理器的一整份快照
     struct Table {
         std::vector<Route> routes;
         std::vector<MiddlewareInfo> middlewares;
+        // method → 路由视图。由 rebuildIndex() 在每次变更后重建。
+        std::unordered_map<std::string, MatchIndex> methodIndex;
         std::function<void(const http::HttpRequest&, http::HttpResponse&)> notFoundHandler;
         std::function<void(const std::exception&, const http::HttpRequest&,
                            http::HttpResponse&)> errorHandler;
+
+        // 依据当前 routes 重建 methodIndex（只做字符串比较，不构造正则）
+        void rebuildIndex();
     };
 
     // 当前生效的表（只通过 std::atomic_load/atomic_store 读写）
@@ -83,11 +110,19 @@ private:
     static bool matchPath(const std::regex& pathRegex, const std::vector<std::string>& paramNames,
                           const std::string& requestPath,
                           std::unordered_map<std::string, std::string>& params);
+
+    // 在一个方法的路由视图里找匹配项（精确 → 动态）
+    static const Route* matchMethod(const Table& table, const MatchIndex& index,
+                                    const std::string& path,
+                                    std::unordered_map<std::string, std::string>& params);
     
     // 执行中间件链
-    static void executeMiddlewareChain(const Table& table, const http::HttpRequest& request,
-                                       http::HttpResponse& response, std::function<void()> next,
-                                       size_t index);
+    // matched 由调用方（handleRequest）算好传进来：链的每一层不再重复做
+    // O(M) 的正则扫描（原实现每层递归重新 findMiddlewares）。
+    static void executeMiddlewareChain(const http::HttpRequest& request,
+                                       http::HttpResponse& response,
+                                       const std::vector<const MiddlewareInfo*>& matched,
+                                       const std::function<void()>& next, size_t index);
     
     // 查找匹配的路由（HEAD 回退到 GET）
     static const Route* findRoute(const Table& table, const std::string& method,

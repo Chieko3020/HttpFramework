@@ -5,6 +5,50 @@
 
 namespace router {
 
+namespace {
+
+// 把模式路径按 '/' 切段（保留空段语义：不做归一化，避免改变既有匹配行为）
+std::vector<std::string> splitPath(const std::string& path) {
+    std::vector<std::string> segs;
+    std::size_t start = 0;
+    while (true) {
+        std::size_t pos = path.find('/', start);
+        if (pos == std::string::npos) {
+            segs.push_back(path.substr(start));
+            break;
+        }
+        segs.push_back(path.substr(start, pos - start));
+        start = pos + 1;
+    }
+    return segs;
+}
+
+// 分段精确匹配：静态段必须全等，动态段（:param）通过 dynamic 传出
+bool matchSegments(const std::vector<std::string>& patternSegs,
+                   const std::vector<std::string>& pathSegs,
+                   std::vector<std::size_t>* dynamic) {
+    if (patternSegs.size() != pathSegs.size()) return false;
+    if (dynamic) dynamic->clear();
+    for (std::size_t i = 0; i < patternSegs.size(); ++i) {
+        const std::string& p = patternSegs[i];
+        if (p.size() > 1 && p.front() == ':') {
+            if (pathSegs[i].empty()) return false;   // ([^/]+) 不允许空段
+            if (dynamic) dynamic->push_back(i);
+        } else if (p != pathSegs[i]) {
+            return false;
+        }
+    }
+    return true;
+}
+
+// 模式段是否含正则元字符（此时分段匹配不适用，必须回退 std::regex）
+bool hasRegexMeta(const std::string& seg) {
+    static const std::string meta = R"(.*+?^${}()|[]\)";
+    return seg.find_first_of(meta) != std::string::npos;
+}
+
+}  // namespace
+
 Route::Route(const std::string& method, const std::string& path, 
              std::function<void(const http::HttpRequest&, http::HttpResponse&)> handler)
     : method(method), path(path), handler(handler) {
@@ -13,6 +57,37 @@ Route::Route(const std::string& method, const std::string& path,
     auto [regex, paramNames] = RouterHandler::pathToRegex(path);
     pathRegex = regex;
     this->paramNames = paramNames;
+
+    // ── 一次性的匹配计划（构造期算好，请求期只做字符串比较）──
+    // 原实现每个请求对每条路由做 std::regex_match（O(路由数) 次正则），
+    // 这里把"这条路由怎么匹配"提前算成：只含静态段的段向量 / 动态段下标。
+    patternSegs = splitPath(path);
+    bool staticOnly = true;
+    for (std::size_t i = 0; i < patternSegs.size(); ++i) {
+        const std::string& seg = patternSegs[i];
+        if (seg.size() > 1 && seg.front() == ':') {
+            staticOnly = false;
+            paramSegments.push_back(i);
+        } else if (hasRegexMeta(seg)) {
+            // '*' 通配（以及任何正则元字符）无法用分段精确匹配表达
+            staticOnly = false;
+            needsRegex = true;
+        }
+    }
+    isStatic = staticOnly;
+}
+
+void RouterHandler::Table::rebuildIndex() {
+    methodIndex.clear();
+    for (std::size_t i = 0; i < routes.size(); ++i) {
+        MatchIndex& idx = methodIndex[routes[i].method];
+        if (routes[i].isStatic) {
+            // 先注册者优先：原线性扫描遇到同路径重复注册时用第一条，这里保持
+            idx.exact.emplace(routes[i].path, i);
+        } else {
+            idx.dynamicRoutes.push_back(i);
+        }
+    }
 }
 
 MiddlewareInfo::MiddlewareInfo(const std::string& path, 
@@ -56,6 +131,7 @@ void RouterHandler::mutate(const std::function<void(Table&)>& fn) {
     std::shared_ptr<const Table> current = std::atomic_load(&table_);
     auto next = std::make_shared<Table>(*current);
     fn(*next);
+    next->rebuildIndex();   // 索引跟着 routes 一起维护，只在这里重建
     std::atomic_store(&table_, std::shared_ptr<const Table>(std::move(next)));
 }
 
@@ -82,10 +158,11 @@ bool RouterHandler::handleRequest(const http::HttpRequest& request, http::HttpRe
     std::shared_ptr<const Table> table = snapshot();
 
     try {
+        // 中间件只在这一处扫描一次，整条链复用这份列表（原实现每层递归重扫）
         auto matchedMiddlewares = findMiddlewares(*table, request.getPath());
 
         if (!matchedMiddlewares.empty()) {
-            executeMiddlewareChain(*table, request, response,
+            executeMiddlewareChain(request, response, matchedMiddlewares,
                                    [&table, &request, &response]() {
                                        dispatchRoute(*table, request, response);
                                    },
@@ -163,40 +240,64 @@ bool RouterHandler::matchPath(const std::regex& pathRegex, const std::vector<std
     return false;
 }
 
-void RouterHandler::executeMiddlewareChain(const Table& table, const http::HttpRequest& request,
-                                          http::HttpResponse& response, std::function<void()> next,
+void RouterHandler::executeMiddlewareChain(const http::HttpRequest& request,
+                                          http::HttpResponse& response,
+                                          const std::vector<const MiddlewareInfo*>& matched,
+                                          const std::function<void()>& next,
                                           size_t index) {
-    auto matchedMiddlewares = findMiddlewares(table, request.getPath());
-    
-    if (index >= matchedMiddlewares.size()) {
+    if (index >= matched.size()) {
         next();
         return;
     }
-    
-    const MiddlewareInfo* middleware = matchedMiddlewares[index];
-    // table 由调用方的 shared_ptr 保活，这里取到的指针在整个调用链期间有效
-    middleware->middleware(request, response, [&table, &request, &response, next, index]() {
-        executeMiddlewareChain(table, request, response, next, index + 1);
+
+    const MiddlewareInfo* middleware = matched[index];
+    // matched 由 handleRequest 的栈帧持有，覆盖整条链（含中间件里的同步/异步 next()）
+    middleware->middleware(request, response, [&request, &response, &matched, &next, index]() {
+        executeMiddlewareChain(request, response, matched, next, index + 1);
     });
+}
+
+const Route* RouterHandler::matchMethod(const Table& table, const MatchIndex& index,
+                                        const std::string& path,
+                                        std::unordered_map<std::string, std::string>& params) {
+    // ① 静态路由：一次哈希查找
+    auto exactIt = index.exact.find(path);
+    if (exactIt != index.exact.end()) return &table.routes[exactIt->second];
+
+    // 快速退出：该方法下没有动态路由（纯静态路由表）时不做任何分段工作
+    if (index.dynamicRoutes.empty()) return nullptr;
+
+    // ② 动态路由：按注册顺序尝试，静态段全等 + :param 段非空
+    std::vector<std::size_t> dynamicSegs;
+    const std::vector<std::string> pathSegs = splitPath(path);
+    for (std::size_t idx : index.dynamicRoutes) {
+        const Route& route = table.routes[idx];
+        if (!route.needsRegex) {
+            if (!matchSegments(route.patternSegs, pathSegs, &dynamicSegs)) continue;
+            for (std::size_t k = 0; k < dynamicSegs.size() && k < route.paramNames.size(); ++k)
+                params[route.paramNames[k]] = pathSegs[dynamicSegs[k]];
+            return &route;
+        }
+        // 含 '*' 等正则元字符：退化为正则匹配（构造期已编译好 pathRegex）
+        if (matchPath(route.pathRegex, route.paramNames, path, params)) return &route;
+    }
+    return nullptr;
 }
 
 const Route* RouterHandler::findRoute(const Table& table, const std::string& method,
                                       const std::string& path,
                                       std::unordered_map<std::string, std::string>& params) {
-    for (const auto& route : table.routes) {
-        if (route.method == method && matchPath(route.pathRegex, route.paramNames, path, params)) {
-            return &route;
-        }
+    // 先按方法过滤，再做匹配（原实现对每条路由同时比较 method 与正则）
+    auto it = table.methodIndex.find(method);
+    if (it != table.methodIndex.end()) {
+        const Route* hit = matchMethod(table, it->second, path, params);
+        if (hit) return hit;
     }
     // HEAD 请求回退到 GET handler（RFC 9110 §9.3.2）：
     // 响应体由 HttpServer 在序列化时抑制，因此可以安全复用 GET 的实现（H13）
     if (method == "HEAD") {
-        for (const auto& route : table.routes) {
-            if (route.method == "GET" &&
-                matchPath(route.pathRegex, route.paramNames, path, params)) {
-                return &route;
-            }
-        }
+        auto git = table.methodIndex.find("GET");
+        if (git != table.methodIndex.end()) return matchMethod(table, git->second, path, params);
     }
     return nullptr;
 }
