@@ -12,8 +12,10 @@ HttpRequest::HttpRequest()
     : method_(HttpMethod::UNKNOWN), methodString_(""), path_(""), version_("") {
 }
 
-bool HttpRequest::parse(const std::string& rawRequest) {
-    rawRequest_ = rawRequest;
+bool HttpRequest::parse(std::string_view rawView) {
+    // 唯一的整块拷贝：把视图落到 rawRequest_（后续所有查找/切片都基于它）
+    rawRequest_.assign(rawView.data(), rawView.size());
+    const std::string& rawRequest = rawRequest_;
     contentLengthValid_ = true;
     contentLength_ = 0;
     bodyConsumed_ = 0;

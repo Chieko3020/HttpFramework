@@ -96,6 +96,8 @@ public:
     // 数据操作
     char* data() { return block_ ? block_->data : nullptr; }
     const char* data() const { return block_ ? block_->data : nullptr; }
+    // 原始只读指针（配合 usedSize() 做零拷贝读取）
+    const char* rawData() const { return block_ ? block_->data : nullptr; }
     // 本缓冲区的容量：取自所持有内存块的实际容量（构造时由池给出）
     size_t size() const { return block_ ? block_->capacity : 0; }
     

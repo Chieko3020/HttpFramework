@@ -1001,6 +1001,53 @@ static bool test_reason_phrase_and_url_decode() {
     return true;
 }
 
+// ── M4：请求头/缓冲上限与慢速滴灌 ──
+static bool test_request_buffer_limits() {
+    TEST("M4 请求头超 16KB → 431；慢速滴灌的半包请求被超时回收");
+    Fixture f;
+    if (!f.up(/*idleSec=*/1, /*subReactors=*/1, false, 4)) FAIL("服务器启动失败");
+
+    // 1) 请求头超过 16KB
+    {
+        int s = connectTo(f.port);
+        CHECK(s >= 0, "连接失败");
+        std::string huge = "GET /small HTTP/1.1\r\nHost: x\r\nX-Pad: " +
+                           std::string(20 * 1024, 'p') + "\r\n\r\n";
+        CHECK(sendAll(s, huge), "发送失败");
+        auto r = readResponse(s, 4000);
+        std::cout << "(超大头→" << (r.status.empty() ? "无响应" : r.status.substr(9, 3)) << ") ";
+        CHECK(r.complete, "超限请求头应得到明确响应");
+        CHECK(r.status.rfind("HTTP/1.1 431", 0) == 0,
+              "请求头超过上限应回 431, 实际: " << r.status);
+        close(s);
+    }
+
+    // 2) 慢速滴灌：每 300ms 一个字节、永不结束的请求头。
+    //    只看 lastActive 的话永远不空闲；修复后按"半包请求起点"回收。
+    {
+        int s = connectTo(f.port);
+        CHECK(s >= 0, "连接失败");
+        CHECK(sendAll(s, "GET /small HTTP/1.1\r\n"), "发送首段失败");
+        const auto t0 = std::chrono::steady_clock::now();
+        bool closed = false;
+        while (std::chrono::duration_cast<std::chrono::seconds>(
+                   std::chrono::steady_clock::now() - t0).count() < 8) {
+            if (peekClosed(s, 10)) { closed = true; break; }
+            if (!sendAll(s, "X")) break;   // 每 300ms 一个字节
+            std::this_thread::sleep_for(std::chrono::milliseconds(300));
+        }
+        const auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(
+                                 std::chrono::steady_clock::now() - t0).count();
+        std::cout << "(滴灌 " << elapsed << "s 后被回收=" << (closed ? "是" : "否") << ") ";
+        close(s);
+        CHECK(closed, "慢速滴灌的半包请求必须被超时回收（否则单连接内存/时长无界）");
+    }
+
+    f.down();
+    PASS();
+    return true;
+}
+
 int main() {
     std::cout << "=== test_http_hardening ===" << std::endl;
     ignoreSigpipeInTest();
@@ -1027,6 +1074,7 @@ int main() {
     run(test_app_stats_and_signal,    "H15 App 统计与信号");
     run(test_request_framing_hardening, "M3 请求框架头加固");
     run(test_reason_phrase_and_url_decode, "M9/M11 原因短语与解码");
+    run(test_request_buffer_limits,   "M4 请求缓冲上限/慢速滴灌");
 
     std::cout << std::endl
               << "结果: " << g_testsPassed << " 通过, "

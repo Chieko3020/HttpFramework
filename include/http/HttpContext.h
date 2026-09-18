@@ -4,6 +4,7 @@
 #include <chrono>
 #include <memory>
 #include <string>
+#include <string_view>
 #include <unordered_map>
 #include "HttpRequest.h"
 #include "HttpResponse.h"
@@ -49,11 +50,25 @@ public:
     bool isKeepAlive() const { return keepAlive_; }
     
     // 数据缓冲区管理 - 支持内存池和传统方式
+    //
+    // 读取采用"读游标"而不是每次前移缓冲区（M1）：
+    //   peekData()    零拷贝视图，解析器直接在其上工作
+    //   consumeData(n) 只推进游标；缓冲区在下一次 appendData 时才压缩一次
+    // 旧实现对每次消费都做 memmove，且解析前还要整块拷一份 std::string。
     void appendData(const std::string& data);
     void appendData(const char* data, size_t len);
-    std::string getData() const;
+    std::string_view peekData() const;
+    size_t dataSize() const { return peekData().size(); }
+    std::string getData() const;      // 兼容接口：返回整块拷贝
     void clearData();
     void consumeData(size_t n);  // 只消费前 n 字节，保留剩余数据
+
+    // 半包请求的起始时刻（用于把"慢速滴灌"与"空闲连接"区分开，M4）
+    std::chrono::steady_clock::time_point requestStart() const { return requestStart_; }
+
+    // 非池模式下请求缓冲超过配置上限（M4）
+    bool isRequestTooLarge() const { return requestTooLarge_; }
+    void setMaxRequestBytes(size_t bytes) { maxRequestBytes_ = bytes > 0 ? bytes : 1; }
 
     // 请求缓冲容量（内存池模式下即池的单块容量）；用于在 413 里给出可区分的上限（H7）
     size_t requestBufferCapacity() const;
@@ -145,6 +160,12 @@ private:
 
     // 最近一次 I/O 活跃时间（空闲超时清理用）
     std::chrono::steady_clock::time_point lastActive_{std::chrono::steady_clock::now()};
+
+    // 读游标与半包起始时刻（M1/M4）
+    size_t readPos_{0};
+    std::chrono::steady_clock::time_point requestStart_{std::chrono::steady_clock::now()};
+    bool requestTooLarge_{false};
+    size_t maxRequestBytes_{1u * 1024u * 1024u};   // 非池模式默认 1MB
 };
 
 } // namespace http

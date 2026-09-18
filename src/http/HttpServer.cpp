@@ -593,6 +593,7 @@ void HttpServer::handleAccept() {
             std::lock_guard<std::mutex> lock(sr->contextsMutex);
             auto ctx = std::make_unique<HttpContext>();
             ctx->setConnectionGeneration(net::connIdGeneration(connId));
+            ctx->setMaxRequestBytes(maxRequestBytes_);
             if (useMemoryPool_) {
                 ctx->enableMemoryPool(true, ownedMemoryPool_.get());
             }
@@ -727,8 +728,7 @@ void HttpServer::handleRead(int clientFd, int subReactorIndex, net::ConnId connI
         return;
     }
 
-    size_t totalRead = 0;
-    std::string data = readAllData(clientFd, &totalRead);
+    const size_t totalRead = readAllData(clientFd, ctxPtr);
 
     if (totalRead == 0) {
         // 未读到任何字节：对端已关闭（EOF）或事件已被取走（EAGAIN）。
@@ -744,7 +744,21 @@ void HttpServer::handleRead(int clientFd, int subReactorIndex, net::ConnId connI
     }
 
     ctxPtr->touch();
-    ctxPtr->appendData(data);
+
+    // 非池模式下请求缓冲超过配置上限：明确拒绝，不能让单连接内存无界增长（M4）
+    if (ctxPtr->isRequestTooLarge()) {
+        std::cerr << "[ERROR][HTTP服务器]：请求缓冲超过上限, fd=" << clientFd
+                  << " limit=" << maxRequestBytes_ << std::endl;
+        auto response = std::make_shared<HttpResponse>();
+        response->setStatus(413, "Payload Too Large");
+        response->setBody(R"({"error":"Request too large or malformed header"})");
+        response->setHeader("Content-Type", "application/json");
+        response->setHeader("Connection", "close");
+        response->markFinalized();
+        enqueueRequestTask(subReactorIndex, clientFd, connId,
+                           std::make_shared<HttpRequest>(), response);
+        return;
+    }
 
     // 内存池分配失败（池耗尽）：服务端容量不足，回 503 而不是 413（H8）
     if (ctxPtr->isAllocationFailed()) {
@@ -807,7 +821,8 @@ void HttpServer::dispatchBufferedRequests(int clientFd, int subReactorIndex,
 
     auto request = std::make_shared<HttpRequest>();
     request->setMaxBodySize(maxRequestBodyBytes_);
-    const std::string buffered = ctxPtr->getData();
+    // 零拷贝视图：解析器直接读连接缓冲（旧实现在这里整块拷了一份 std::string，M1）
+    const std::string_view buffered = ctxPtr->peekData();
     if (!request->parse(buffered)) {
         if (request->hasConflictingFraming() || request->isBodyTooLarge()) {
             // 自相矛盾的框架头 / 超过配置上限的请求体：明确 400/413，且不可复用连接
@@ -835,8 +850,35 @@ void HttpServer::dispatchBufferedRequests(int clientFd, int subReactorIndex,
                                request, response);
             return;
         }
+        // 请求头超过配置上限（缓冲里迟迟没有完整头部，且长度已越界）：431 + 关闭（M4）
+        if (buffered.size() > maxRequestHeaderBytes_) {
+            std::cerr << "[ERROR][HTTP服务器]：请求头超过上限, fd=" << clientFd
+                      << " size=" << buffered.size() << " limit=" << maxRequestHeaderBytes_
+                      << std::endl;
+            auto response = std::make_shared<HttpResponse>();
+            response->setStatus(431, "Request Header Fields Too Large");
+            response->setJson(R"({"error":"Request header too large"})");
+            response->setHeader("Connection", "close");
+            response->markFinalized();
+            enqueueRequestTask(subReactorIndex, clientFd, connId, request, response);
+            return;
+        }
         // 请求不完整：重新注册 EPOLLIN（EPOLLONESHOT 需要显式重置）
         rearmRead(clientFd, subReactorIndex, connId);
+        return;
+    }
+
+    // 请求头长度上限：解析成功后也要检查（头部本身可以"完整但过长"）（M4）
+    if (request->getHeaderEnd() + request->getHeaderEndSepLen() > maxRequestHeaderBytes_) {
+        std::cerr << "[ERROR][HTTP服务器]：请求头超过上限, fd=" << clientFd
+                  << " headerBytes=" << (request->getHeaderEnd() + request->getHeaderEndSepLen())
+                  << " limit=" << maxRequestHeaderBytes_ << std::endl;
+        auto response = std::make_shared<HttpResponse>();
+        response->setStatus(431, "Request Header Fields Too Large");
+        response->setJson(R"({"error":"Request header too large"})");
+        response->setHeader("Connection", "close");
+        response->markFinalized();
+        enqueueRequestTask(subReactorIndex, clientFd, connId, request, response);
         return;
     }
 
@@ -952,10 +994,20 @@ void HttpServer::handleTimer(int subReactorIndex) {
                 ++skippedInFlight;
                 continue;
             }
+            // 空闲判据取"最近一次 I/O 活跃"，但**半包请求另有独立起点**：
+            // 否则客户端每 1 字节就刷新 lastActive，一个永不结束的请求头
+            // 可以把连接永远拖着（真实的慢速 DoS）（M4）。
             auto idle = std::chrono::duration_cast<std::chrono::seconds>(
                             now - ctx->lastActive())
                             .count();
-            if (idle >= idleTimeoutSec_) {
+            bool stale = (idle >= idleTimeoutSec_);
+            if (!stale && ctx->dataSize() > 0) {
+                auto partial = std::chrono::duration_cast<std::chrono::seconds>(
+                                   now - ctx->requestStart())
+                                   .count();
+                stale = (partial >= idleTimeoutSec_);
+            }
+            if (stale) {
                 idleConns.push_back(net::makeConnId(fd, ctx->connectionGeneration()));
             }
         }
@@ -1059,7 +1111,7 @@ void HttpServer::writeCurrentResponse(int clientFd, int subReactorIndex, HttpCon
             rearmRead(clientFd, subReactorIndex,
                       net::makeConnId(clientFd, ctxPtr->connectionGeneration()));
             // 缓冲区中可能已缓存下一个请求（粘包 / pipelining），立即处理
-            if (!ctxPtr->getData().empty()) {
+            if (ctxPtr->dataSize() > 0) {
                 dispatchBufferedRequests(
                     clientFd, subReactorIndex,
                     net::makeConnId(clientFd, ctxPtr->connectionGeneration()));
@@ -1197,15 +1249,15 @@ void HttpServer::processHttpRequest(int subReactorIndex, net::ConnId connId,
 
 // ---- I/O 辅助 ----
 
-std::string HttpServer::readAllData(int fd, size_t* totalRead) {
-    std::string data;
+// 直接把数据读进连接的请求缓冲：省掉"临时 std::string + appendData 拷贝"两份拷贝中的一份（M1）
+size_t HttpServer::readAllData(int fd, HttpContext* ctx) {
     char buffer[4096];
     size_t readBytes = 0;
 
     while (true) {
         ssize_t n = read(fd, buffer, sizeof(buffer));
         if (n > 0) {
-            data.append(buffer, static_cast<size_t>(n));
+            ctx->appendData(buffer, static_cast<size_t>(n));
             readBytes += static_cast<size_t>(n);
         } else if (n == 0) {
             break;
@@ -1217,8 +1269,7 @@ std::string HttpServer::readAllData(int fd, size_t* totalRead) {
         }
     }
 
-    if (totalRead) *totalRead = readBytes;
-    return data;
+    return readBytes;
 }
 
 bool HttpServer::writeAllDataFromOffset(int fd, const std::string& data,

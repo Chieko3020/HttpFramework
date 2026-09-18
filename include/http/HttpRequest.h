@@ -1,6 +1,7 @@
 #pragma once
 
 #include <string>
+#include <string_view>
 #include <unordered_map>
 #include <vector>
 #include <sstream>
@@ -23,8 +24,10 @@ public:
     HttpRequest();
     ~HttpRequest() = default;
     
-    // 解析HTTP请求
-    bool parse(const std::string& rawRequest);
+    // 解析HTTP请求。
+    // 接受 string_view：调用方可以直接把连接缓冲的视图传进来，省掉一次整块拷贝（M1）。
+    // 内部只在开头把视图拷进 rawRequest_（解析需要稳定存储）。
+    bool parse(std::string_view rawRequest);
     
     // 获取方法
     HttpMethod getMethod() const { return method_; }

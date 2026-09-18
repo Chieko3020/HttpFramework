@@ -41,6 +41,8 @@ void HttpContext::clear() {
     writeOffset_ = 0;
     truncated_ = false;
     allocationFailed_ = false;
+    requestTooLarge_ = false;
+    readPos_ = 0;
     clearCurrentResponse();
 }
 
@@ -53,6 +55,7 @@ void HttpContext::resetForNextRequest() {
     writeOffset_ = 0;
     truncated_ = false;
     allocationFailed_ = false;
+    requestTooLarge_ = false;
     clearCurrentResponse();
 }
 
@@ -61,25 +64,17 @@ void HttpContext::resetForNextRequest() {
 //   写不满（有块）  → truncated_：请求体超过单块容量 → 413
 //   完全写不进（无块/池耗尽）→ allocationFailed_：服务端容量不足 → 503
 // 旧实现把后两种都当成"截断"，池耗尽时会回一个语义错误的 413。
+// 把待写入的数据落到真实缓冲区。写之前先把已消费的读游标压缩掉
+// （每次读事件最多一次 memmove，而不是每次 consume 都搬），并维护
+// "半包起始时刻"与"超过配置上限"两个状态（M1/M4）。
 void HttpContext::appendData(const std::string& data) {
-    if (useMemoryPool_) {
-        if (!requestBuffer_) {
-            requestBuffer_ = std::make_unique<utils::PooledBuffer>(memoryPool_);
-        }
-        if (!requestBuffer_->valid()) {
-            allocationFailed_ = true;
-            return;
-        }
-        size_t written = requestBuffer_->write(data);
-        if (written < data.size()) {
-            truncated_ = true;
-        }
-    } else {
-        buffer_ += data;
-    }
+    appendData(data.data(), data.size());
 }
 
 void HttpContext::appendData(const char* data, size_t len) {
+    if (len == 0) return;
+    const bool wasEmpty = (dataSize() == 0);
+
     if (useMemoryPool_) {
         if (!requestBuffer_) {
             requestBuffer_ = std::make_unique<utils::PooledBuffer>(memoryPool_);
@@ -87,25 +82,48 @@ void HttpContext::appendData(const char* data, size_t len) {
         if (!requestBuffer_->valid()) {
             allocationFailed_ = true;
             return;
+        }
+        if (readPos_ > 0) {
+            requestBuffer_->consume(readPos_);   // 压缩一次
+            readPos_ = 0;
         }
         size_t written = requestBuffer_->write(data, len);
         if (written < len) {
             truncated_ = true;
         }
     } else {
+        if (readPos_ > 0) {
+            buffer_.erase(0, readPos_);
+            readPos_ = 0;
+        }
         buffer_.append(data, len);
+        // 请求缓冲上限：慢速滴灌不能把单连接内存拖到无界（M4）
+        if (buffer_.size() > maxRequestBytes_) {
+            requestTooLarge_ = true;
+        }
+    }
+
+    if (wasEmpty) {
+        requestStart_ = std::chrono::steady_clock::now();
     }
 }
 
-std::string HttpContext::getData() const {
+std::string_view HttpContext::peekData() const {
     if (useMemoryPool_) {
-        if (requestBuffer_) {
-            return requestBuffer_->readString(requestBuffer_->getUsedSize());
-        }
-        return {};
-    } else {
-        return buffer_;
+        if (!requestBuffer_) return {};
+        const char* p = requestBuffer_->rawData();
+        const size_t n = requestBuffer_->getUsedSize();
+        if (!p || readPos_ >= n) return {};
+        return std::string_view(p + readPos_, n - readPos_);
     }
+    if (readPos_ >= buffer_.size()) return {};
+    return std::string_view(buffer_.data() + readPos_, buffer_.size() - readPos_);
+}
+
+std::string HttpContext::getData() const {
+    // 兼容接口：返回剩余数据的整块拷贝（内部路径已改用 peekData()）
+    std::string_view v = peekData();
+    return std::string(v.data(), v.size());
 }
 
 size_t HttpContext::requestBufferCapacity() const {
@@ -125,20 +143,22 @@ void HttpContext::clearData() {
     } else {
         buffer_.clear();
     }
+    readPos_ = 0;
 }
 
 void HttpContext::consumeData(size_t n) {
-    if (useMemoryPool_) {
-        if (requestBuffer_) {
-            requestBuffer_->consume(n);
-        }
-    } else {
-        if (n >= buffer_.size()) {
-            buffer_.clear();
+    // 只推进读游标（零拷贝）；缓冲区的物理回收推迟到下一次 appendData（M1）
+    const size_t size = dataSize();
+    if (n >= size) {
+        if (useMemoryPool_) {
+            if (requestBuffer_) requestBuffer_->clear();
         } else {
-            buffer_.erase(0, n);
+            buffer_.clear();
         }
+        readPos_ = 0;
+        return;
     }
+    readPos_ += n;
 }
 
 void HttpContext::enableMemoryPool(bool enable, utils::HttpMemoryPool* pool) {

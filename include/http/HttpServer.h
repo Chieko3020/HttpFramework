@@ -74,6 +74,14 @@ public:
     }
     size_t maxRequestBodyBytes() const { return maxRequestBodyBytes_; }
 
+    // 非池模式下单连接请求缓冲总量上限（默认 1MB）与请求头上限（默认 16KB）（M4）
+    void setMaxRequestBytes(size_t bytes) { maxRequestBytes_ = bytes > 0 ? bytes : 1; }
+    size_t maxRequestBytes() const { return maxRequestBytes_; }
+    void setMaxRequestHeaderBytes(size_t bytes) {
+        maxRequestHeaderBytes_ = bytes > 0 ? bytes : 1;
+    }
+    size_t maxRequestHeaderBytes() const { return maxRequestHeaderBytes_; }
+
     static bool isPortInUse(int port);
 
     struct Statistics {
@@ -161,6 +169,9 @@ private:
 
     // 单请求体上限（M3）
     size_t maxRequestBodyBytes_{64u * 1024u * 1024u};
+    // 非池模式单连接请求缓冲上限 / 请求头上限（M4）
+    size_t maxRequestBytes_{1u * 1024u * 1024u};
+    size_t maxRequestHeaderBytes_{16u * 1024u};
 
     // stop() 关停排空（H3）：在途任务计数 + 归零通知
     std::atomic<uint64_t> inFlightTasks_{0};
@@ -230,7 +241,8 @@ private:
     void writeCurrentResponse(int clientFd, int subReactorIndex, HttpContext* ctx);
 
     // ---- I/O 辅助 ----
-    std::string readAllData(int fd, size_t* totalRead = nullptr);
+    // 把 socket 上可读的数据直接读进连接的请求缓冲（不再经一个临时 std::string，M1）
+    size_t readAllData(int clientFd, HttpContext* ctx);
     bool writeAllDataFromOffset(int fd, const std::string& data, size_t offset,
                                 size_t* bytesWritten = nullptr);
 };
