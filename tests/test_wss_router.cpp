@@ -29,13 +29,14 @@
 #define PASS() std::cout << "通过" << std::endl
 #define FAIL(msg) do { std::cerr << "失败: " << msg << std::endl; return false; } while(0)
 #define CHECK(cond, msg) if (!(cond)) FAIL(msg)
-// SKIP：报告为"跳过"（计入 g_testsSkipped），不计入通过
+// SKIP：报告为"跳过"（只计入 g_testsSkipped，并置 g_skipFlag 让 run() 不要把它
+//       算成通过；返回值是 false，因此退出码语义不变 —— 跳过不算失败）
 #define SKIP(msg) do { std::cout << "跳过 (" << msg << ")" << std::endl; ++g_testsSkipped; g_skipFlag = true; return false; } while(0)
 
 static int g_testsPassed = 0;
 static int g_testsFailed = 0;
 static int g_testsSkipped = 0;
-static bool g_skipFlag = false;
+[[maybe_unused]] static bool g_skipFlag = false;
 
 namespace {
 

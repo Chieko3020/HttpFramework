@@ -13,12 +13,15 @@
 #define PASS() std::cout << "通过" << std::endl
 #define FAIL(msg) do { std::cerr << "失败: " << msg << std::endl; return false; } while(0)
 #define CHECK(cond, msg) if (!(cond)) FAIL(msg)
-// SKIP：报告为"跳过"（计入 g_testsSkipped），不计入通过
-#define SKIP(msg) do { std::cout << "跳过 (" << msg << ")" << std::endl; ++g_testsSkipped; return true; } while(0)
+// SKIP：报告为"跳过"（只计入 g_testsSkipped，并置 g_skipFlag 让 run() 不要把它
+//       算成通过；返回值是 false，因此退出码语义不变 —— 跳过不算失败）
+#define SKIP(msg) do { std::cout << "跳过 (" << msg << ")" << std::endl; ++g_testsSkipped; g_skipFlag = true; return false; } while(0)
 
 static int g_testsPassed = 0;
 static int g_testsFailed = 0;
 static int g_testsSkipped = 0;
+// SKIP 用：让 run() 知道"这次返回 false 是跳过，不是失败"
+[[maybe_unused]] static bool g_skipFlag = false;
 
 // 辅助：shell 命令包装
 static inline void sh(const char* cmd) { int r = system(cmd); (void)r; }
@@ -151,8 +154,9 @@ int main() {
 
     auto run = [](bool (*fn)(), const char* name) {
         std::cout << "[运行] " << name << std::endl;
-        if (fn()) { g_testsPassed++; }
-        else      { g_testsFailed++; }
+        g_skipFlag = false;   // fn() 里的 SKIP 会置位
+        if (fn()) { if (!g_skipFlag) ++g_testsPassed; }
+        else if (!g_skipFlag) { ++g_testsFailed; }
     };
 
     run(test_load_builtin_template,   "加载内置模板");
@@ -164,7 +168,8 @@ int main() {
     std::cout << std::endl
               << "结果: " << g_testsPassed << " 通过, "
               << g_testsFailed << " 失败, "
-              << g_testsSkipped << " 跳过" << std::endl;
+              << g_testsSkipped << " 跳过（总用例 "
+              << (g_testsPassed + g_testsFailed + g_testsSkipped) << "）" << std::endl;
 
     return g_testsFailed > 0 ? 1 : 0;
 }
