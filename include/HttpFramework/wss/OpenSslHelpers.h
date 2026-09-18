@@ -11,7 +11,8 @@
 namespace http {
 namespace wss {
 
-// 创建服务端 SSL_CTX，加载 PEM 证书和私钥
+// 创建服务端 SSL_CTX，加载 PEM 证书和私钥。
+// 失败（证书/私钥缺失、不匹配、空路径等）返回 nullptr 并打印原因，不抛异常。
 SSL_CTX* createServerContext(const TlsConfig& cfg);
 
 // 在已有 SSL_CTX 上创建客户端 SSL 会话对象

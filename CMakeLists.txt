@@ -87,6 +87,9 @@ if(BUILD_EXAMPLES)
     add_subdirectory(examples)
 endif()
 
+# CTest：注册 tests/ 下的用例，`ctest --output-on-failure` 可一次跑完
+# enable_testing() 必须在顶层调用，否则子目录里的 add_test 不会生成 CTestTestfile
+enable_testing()
 add_subdirectory(tests)
 
 # ---- 安装规则 ----

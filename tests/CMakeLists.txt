@@ -1,5 +1,6 @@
 # 测试目标 — 每个测试独立可执行，返回 0=通过, 非 0=失败
 
+# 用例通过 CTest 注册（enable_testing() 在顶层 CMakeLists 调用）
 # 公共编译定义
 set(TEST_DEFS
     TEMPLATES_DIR="${CMAKE_BINARY_DIR}/templates/"
@@ -71,6 +72,12 @@ add_executable(test_edge_stress test_edge_stress.cpp)
 target_link_libraries(test_edge_stress PRIVATE http_framework)
 target_compile_definitions(test_edge_stress PRIVATE ${TEST_DEFS})
 
+# ── 加固回归测试（深度审查修复项：C1/C2/C3/C4/C5/C6/H1/H2）──
+
+add_executable(test_http_hardening test_http_hardening.cpp)
+target_link_libraries(test_http_hardening PRIVATE http_framework)
+target_compile_definitions(test_http_hardening PRIVATE ${TEST_DEFS})
+
 # ── 自定义目标：运行所有测试 ──
 
 # 收集所有测试目标
@@ -87,11 +94,27 @@ set(ALL_TESTS
     test_http_db
     test_edge_input
     test_edge_stress
+    test_http_hardening
 )
 
 if(ENABLE_WSS)
     list(APPEND ALL_TESTS test_edge_cert)
 endif()
+
+# ── CTest 注册 ──
+# test_http_db 需要真实 MySQL 实例；未配置数据库时用标签标记，可用
+#   ctest -LE requires-db
+# 跳过。其余测试默认全部纳入。
+foreach(TEST_NAME ${ALL_TESTS})
+    add_test(NAME ${TEST_NAME} COMMAND ${TEST_NAME})
+    set_tests_properties(${TEST_NAME} PROPERTIES
+        WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
+        TIMEOUT 300
+    )
+    if(TEST_NAME STREQUAL "test_http_db")
+        set_tests_properties(${TEST_NAME} PROPERTIES LABELS requires-db)
+    endif()
+endforeach()
 
 # 运行单个测试的脚本模板
 foreach(TEST_NAME ${ALL_TESTS})

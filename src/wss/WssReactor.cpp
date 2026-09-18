@@ -487,6 +487,7 @@ bool WssReactor::start() {
 
         OPENSSL_init_ssl(0, nullptr);
         st.ctx = createServerContext(tlsConfig_);
+        if (!st.ctx) throw std::runtime_error("createServerContext returned nullptr");
         st.listen_fd = createListenSocket(port_);
         st.epoll_fd = epoll_create1(0);
         if (st.epoll_fd < 0) throw std::runtime_error("epoll_create1 failed");
