@@ -22,14 +22,18 @@ struct Route {
     std::function<void(const http::HttpRequest&, http::HttpResponse&)> handler;
 
     // ── 一次性算好的匹配计划（见 Route 构造函数）──
-    // isStatic=true 时只做整串哈希比较；否则按 pathSegs 分段比较，
-    // 只有段内含正则元字符（即 '*' 通配）时才走 pathRegex。
-    std::vector<std::string> patternSegs;
-    // 段下标 → paramNames 的下标一致（pathToRegex 按出现顺序收集），
-    // 因此第 k 个动态段对应的参数名是 paramNames[k]。
-    std::vector<std::size_t> paramSegments;
-    bool isStatic{false};
-    bool needsRegex{false};
+    // 分段匹配必须与 pathToRegex 的语法**严格等价**，否则同一份路径模式的
+    // 匹配结果会因"走哪条快路径"而不同。因此只在一段一段都能一一对应时才启用
+    // 分段快路径，判据（见 .cpp 的 isPureParamSeg / segmentHasColon）：
+    //   * 每一段：不含 ':' 且不含正则元字符 → 静态段，按字符串全等比较；
+    //   * 每一段：整段恰好是 ":标识符" → 动态段，等价于正则 ([^/]+)，且
+    //     占位符个数 == paramNames 个数。
+    // 任何其他形态（":name.json"、段中部 ":c"、同段两个 ":a:b"）都会**整条路由**
+    // 退化为 pathRegex：这些形态在 pathToRegex 里要么吞掉静态后缀、要么把字面
+    // ':' 当锚点、要么产生比 paramNames 更多的捕获组，分段匹配无法复刻。
+    std::vector<std::string> patternSegs;   // 仅 needsRegex==false 时有意义
+    bool isStatic{false};    // 纯静态：整串全等即可判定（无 ':' 且无正则元字符）
+    bool needsRegex{false};  // 必须走 pathRegex（含 ':' 的复杂形态或 '*' 通配）
 
     Route(const std::string& method, const std::string& path, 
           std::function<void(const http::HttpRequest&, http::HttpResponse&)> handler);
@@ -81,7 +85,7 @@ private:
     struct MatchIndex {
         // 静态路径（无 :param / *，模式与请求路径全等）→ routes 下标
         std::unordered_map<std::string, std::size_t> exact;
-        // 动态路径下标，注册顺序（决定匹配优先级，与原线性扫描一致）
+        // 动态路径下标，注册顺序
         std::vector<std::size_t> dynamicRoutes;
     };
 
@@ -111,7 +115,9 @@ private:
                           const std::string& requestPath,
                           std::unordered_map<std::string, std::string>& params);
 
-    // 在一个方法的路由视图里找匹配项（精确 → 动态）
+    // 在一个方法的路由视图里找匹配项
+    // 优先级与原线性扫描一致：**按注册顺序**取第一条命中的路由；静态表的
+    // 哈希命中不享有额外优先权（若它注册得比某条动态路由晚，动态路由先赢）。
     static const Route* matchMethod(const Table& table, const MatchIndex& index,
                                     const std::string& path,
                                     std::unordered_map<std::string, std::string>& params);

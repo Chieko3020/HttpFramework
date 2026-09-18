@@ -2,10 +2,33 @@
 #include <iostream>
 #include <regex>
 #include <algorithm>
+#include <cassert>
+#include <cctype>
 
 namespace router {
 
 namespace {
+
+// ── 分段快路径的适用条件（必须与 pathToRegex 严格等价）────────────────
+// pathToRegex 用正则 `:([a-zA-Z_][a-zA-Z0-9_]*)` 在整条路径上搜索占位符，
+// 与段边界无关，因此下列形态的分段匹配**无法复刻**其语义，必须整条路由退化：
+//   * "/f/:name.json" → 正则是 ^/f/([^/]+)\.json$（后缀是字面量），
+//     分段匹配会把整段当参数 → 参数值吞掉 ".json"，且 "/f/abc" 被误命中；
+//   * "/a/b:c"        → 正则把 ':' 当占位符起点 → ^/a/b([^/]+)$，
+//     分段匹配把 "b:c" 当静态段 → 旧实现命中、新实现 404；
+//   * "/x/:a:b"       → 正则只替换第一个占位符 → 捕获组数与参数名数不等，
+//     分段匹配会把整段塞给第一个参数。
+bool isPureParamSeg(const std::string& seg) {
+    if (seg.size() < 2 || seg.front() != ':') return false;
+    if (!(std::isalpha(static_cast<unsigned char>(seg[1])) || seg[1] == '_')) return false;
+    for (std::size_t k = 2; k < seg.size(); ++k)
+        if (!(std::isalnum(static_cast<unsigned char>(seg[k])) || seg[k] == '_')) return false;
+    return true;
+}
+
+bool segmentHasColon(const std::string& seg) {
+    return seg.find(':') != std::string::npos;
+}
 
 // 把模式路径按 '/' 切段（保留空段语义：不做归一化，避免改变既有匹配行为）
 std::vector<std::string> splitPath(const std::string& path) {
@@ -23,7 +46,8 @@ std::vector<std::string> splitPath(const std::string& path) {
     return segs;
 }
 
-// 分段精确匹配：静态段必须全等，动态段（:param）通过 dynamic 传出
+// 分段精确匹配：静态段必须全等，动态段（:param）通过 dynamic 传出。
+// 只在 Route 构造期确认过"每一段都是纯静态段或纯 :标识符段"之后才会被调用。
 bool matchSegments(const std::vector<std::string>& patternSegs,
                    const std::vector<std::string>& pathSegs,
                    std::vector<std::size_t>* dynamic) {
@@ -31,7 +55,7 @@ bool matchSegments(const std::vector<std::string>& patternSegs,
     if (dynamic) dynamic->clear();
     for (std::size_t i = 0; i < patternSegs.size(); ++i) {
         const std::string& p = patternSegs[i];
-        if (p.size() > 1 && p.front() == ':') {
+        if (isPureParamSeg(p)) {
             if (pathSegs[i].empty()) return false;   // ([^/]+) 不允许空段
             if (dynamic) dynamic->push_back(i);
         } else if (p != pathSegs[i]) {
@@ -41,7 +65,7 @@ bool matchSegments(const std::vector<std::string>& patternSegs,
     return true;
 }
 
-// 模式段是否含正则元字符（此时分段匹配不适用，必须回退 std::regex）
+// 模式段是否含正则元字符
 bool hasRegexMeta(const std::string& seg) {
     static const std::string meta = R"(.*+?^${}()|[]\)";
     return seg.find_first_of(meta) != std::string::npos;
@@ -59,22 +83,58 @@ Route::Route(const std::string& method, const std::string& path,
     this->paramNames = paramNames;
 
     // ── 一次性的匹配计划（构造期算好，请求期只做字符串比较）──
-    // 原实现每个请求对每条路由做 std::regex_match（O(路由数) 次正则），
-    // 这里把"这条路由怎么匹配"提前算成：只含静态段的段向量 / 动态段下标。
+    // 原实现每个请求对每条路由做 std::regex_match（O(路由数) 次正则）。
+    // 这里把"这条路由怎么匹配"提前算好：段向量 / 是否必须走正则。
+    // 判据见头文件 Route 的注释：只有"纯静态段 + 纯 :标识符段"一一对应时，
+    // 分段匹配才与 pathToRegex 等价，否则整条路由退化为 pathRegex。
     patternSegs = splitPath(path);
-    bool staticOnly = true;
-    for (std::size_t i = 0; i < patternSegs.size(); ++i) {
-        const std::string& seg = patternSegs[i];
-        if (seg.size() > 1 && seg.front() == ':') {
-            staticOnly = false;
-            paramSegments.push_back(i);
-        } else if (hasRegexMeta(seg)) {
-            // '*' 通配（以及任何正则元字符）无法用分段精确匹配表达
-            staticOnly = false;
+    bool anyColon = false;
+    bool anyMeta = false;
+    for (const std::string& seg : patternSegs) {
+        if (segmentHasColon(seg)) anyColon = true;
+        if (hasRegexMeta(seg)) anyMeta = true;
+    }
+
+    if (!anyColon && !anyMeta) {
+        // 无 ':' 也无正则元字符 ⇒ pathToRegex 得到的正则里没有占位符、也没有
+        // 通配（元字符全被转义成字面量），"整串全等"与旧实现完全等价。
+        isStatic = true;
+        needsRegex = false;
+    } else if (anyMeta) {
+        // 含 '*'（通配）或其他正则元字符 ⇒ 必须用 pathRegex。
+        // 注意不能靠"段全等"处理：'*' 段要匹配任意子路径，且旧实现把静态段里
+        // 的 '.', '+' 等转义成了字面量，分段全等虽然也能做到字面量比较，但
+        // 通配段无法表达，统一走正则最稳。
+        isStatic = false;
+        needsRegex = true;
+    } else {
+        // 含 ':' 但没有元字符：只有"每一段都是纯静态段或纯 :标识符段"时，
+        // 分段匹配才与 pathToRegex 一一对应（判据见头文件 Route 的注释）。
+        bool fastPathOk = true;
+        bool anyParam = false;
+        for (const std::string& seg : patternSegs) {
+            if (isPureParamSeg(seg)) { anyParam = true; continue; }
+            if (segmentHasColon(seg)) { fastPathOk = false; break; }
+        }
+        if (fastPathOk && anyParam) {
+            isStatic = false;
+            needsRegex = false;
+        } else {
+            // 段内含 ':' 的复杂形态（":name.json" / "b:c" / ":a:b"）：走 pathRegex
+            isStatic = false;
             needsRegex = true;
         }
     }
-    isStatic = staticOnly;
+
+    if (!needsRegex) {
+        // 构造期一致性检查：快路径下 paramNames 必须与动态段一一对应，
+        // 否则说明上述等价性判据又和 pathToRegex 分叉了（见头文件注释）
+        std::size_t paramSegCount = 0;
+        for (const std::string& seg : patternSegs)
+            if (isPureParamSeg(seg)) ++paramSegCount;
+        assert(paramSegCount == paramNames.size() &&
+               "分段快路径的 :param 个数与 pathToRegex 收集的参数名个数不一致");
+    }
 }
 
 void RouterHandler::Table::rebuildIndex() {
@@ -260,28 +320,47 @@ void RouterHandler::executeMiddlewareChain(const http::HttpRequest& request,
 const Route* RouterHandler::matchMethod(const Table& table, const MatchIndex& index,
                                         const std::string& path,
                                         std::unordered_map<std::string, std::string>& params) {
-    // ① 静态路由：一次哈希查找
+    // ① 静态命中的候选：哈希一次拿到，但**不立即返回** —— 优先级仍是"先注册
+    //    者优先"，注册在它之前的动态路由（若也命中）要赢。旧实现是按注册顺序
+    //    逐条做 method + 正则，这里用"与 exactIdx 比较注册下标"复刻同一顺序。
+    const Route* exactRoute = nullptr;
+    std::size_t exactIdx = 0;
     auto exactIt = index.exact.find(path);
-    if (exactIt != index.exact.end()) return &table.routes[exactIt->second];
+    if (exactIt != index.exact.end()) {
+        exactIdx = exactIt->second;
+        exactRoute = &table.routes[exactIdx];
+    }
 
-    // 快速退出：该方法下没有动态路由（纯静态路由表）时不做任何分段工作
-    if (index.dynamicRoutes.empty()) return nullptr;
+    if (index.dynamicRoutes.empty()) return exactRoute;
 
     // ② 动态路由：按注册顺序尝试，静态段全等 + :param 段非空
     std::vector<std::size_t> dynamicSegs;
     const std::vector<std::string> pathSegs = splitPath(path);
+    const Route* bestDynamic = nullptr;
     for (std::size_t idx : index.dynamicRoutes) {
+        if (exactRoute && idx > exactIdx) break;   // 已越过静态命中，后面的都更晚注册
         const Route& route = table.routes[idx];
-        if (!route.needsRegex) {
-            if (!matchSegments(route.patternSegs, pathSegs, &dynamicSegs)) continue;
-            for (std::size_t k = 0; k < dynamicSegs.size() && k < route.paramNames.size(); ++k)
-                params[route.paramNames[k]] = pathSegs[dynamicSegs[k]];
-            return &route;
+        bool hit;
+        if (route.needsRegex) {
+            // 含 ':' 的复杂形态或 '*' 等正则元字符，一律用构造期编译好的 pathRegex
+            std::unordered_map<std::string, std::string> tmp;
+            hit = matchPath(route.pathRegex, route.paramNames, path, tmp);
+            if (hit) for (auto& kv : tmp) params[kv.first] = kv.second;
+        } else {
+            dynamicSegs.clear();   // 每条路由都要重新收集（不能带上一轮的残留）
+            std::unordered_map<std::string, std::string> tmp;
+            hit = matchSegments(route.patternSegs, pathSegs, &dynamicSegs);
+            if (hit) {
+                for (std::size_t k = 0; k < dynamicSegs.size() && k < route.paramNames.size(); ++k)
+                    tmp[route.paramNames[k]] = pathSegs[dynamicSegs[k]];
+                for (auto& kv : tmp) params[kv.first] = kv.second;
+            }
         }
-        // 含 '*' 等正则元字符：退化为正则匹配（构造期已编译好 pathRegex）
-        if (matchPath(route.pathRegex, route.paramNames, path, params)) return &route;
+        if (hit) { bestDynamic = &route; break; }
     }
-    return nullptr;
+
+    if (bestDynamic) return bestDynamic;
+    return exactRoute;
 }
 
 const Route* RouterHandler::findRoute(const Table& table, const std::string& method,

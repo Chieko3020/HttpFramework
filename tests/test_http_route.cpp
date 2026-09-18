@@ -6,6 +6,7 @@
 #include "http/HttpRequest.h"
 #include "http/HttpResponse.h"
 #include <iostream>
+#include <set>
 #include <string>
 
 #define TEST(name) std::cout << "  [测试] " << name << "... "
@@ -210,10 +211,18 @@ static bool test_request_body() {
     return true;
 }
 
-// 路由匹配计划的等价性回归：哈希精确匹配 + 分段匹配必须与"逐条 regex_match"
-// 给出相同的结论（本用例在旧实现上也应通过，用于保护优化后的匹配语义）
-static bool test_match_index_equivalence() {
-    TEST("哈希/分段匹配与线性正则语义等价");
+// 匹配语义的回归（哈希/分段快路径 vs 逐条 regex_match）。
+//
+// 优先级**与旧实现一致**：按注册顺序取第一条命中。哈希静态表只是"候选之一"，
+// 静态命中不会因为它是静态就抢先 —— 若某条动态路由注册在它之前且同样命中，
+// 动态路由先赢（见第一条断言：/users/:id 注册在前，因此 /users/me 命中的是
+// 动态路由、id=me）。这正是旧实现（be00e05）的行为，本用例在旧实现上也通过。
+//
+// 除优先级之外，分段匹配严格复刻 pathToRegex 语义：含 ':' 的复杂形态
+// （":name.json" / "b:c" / ":a:b"）整条退回正则，通配 '*' 与正则元字符同样走
+// 正则 —— 这些钉在 test_param_syntax_equivalence 里。
+static bool test_match_index_semantics() {
+    TEST("哈希/分段匹配语义（注册顺序优先 + 复杂 :param 形态退回正则）");
     router::Router router;
 
     std::string hit;
@@ -232,7 +241,7 @@ static bool test_match_index_equivalence() {
 
     http::HttpRequest r1; r1.parse(makeRequest("GET", "/users/me"));
     http::HttpResponse s1; router.handleRequest(r1, s1);
-    CHECK(hit == "static", "静态段与 :param 同名时静态路由应优先, 实际 '" << hit << "'");
+    CHECK(hit == "dynamic:me", "注册在前的动态路由应先命中, 实际 '" << hit << "'");
 
     hit.clear();
     http::HttpRequest r2; r2.parse(makeRequest("GET", "/users/42"));
@@ -279,6 +288,104 @@ static bool test_match_index_equivalence() {
     return true;
 }
 
+// ── 分段匹配与 pathToRegex 的严格等价（四个曾实测分叉的反例）──────────────
+//
+// 背景：分段快路径曾把"段首是 ':'"一律当成动态段，与 pathToRegex
+// （正则 `:([a-zA-Z_][a-zA-Z0-9_]*)` 在整条路径上搜索、与段边界无关）
+// 在四种形态上分叉：
+//   A "/f/:name.json" + "/f/abc.json" → 后缀被参数吞掉（name=abc.json）
+//   B "/f/:name.json" + "/f/abc"      → 旧实现 404，新实现被误命中
+//   C "/a/b:c"        + "/a/bXYZ"     → 旧实现命中 c=XYZ，新实现 404
+//   D "/x/:a:b"       + "/x/12"       → 旧实现 a=1,b=2，新实现只剩 a=12
+// （另有"静态段里的正则元字符"与"通配 *"两类：'.' 必须按字面量匹配、'*' 必须
+//  匹配任意子路径，二者都不能走整串全等。）
+// 修复口径：只有"每一段都是纯静态段或纯 :标识符段"时才用分段快路径，
+// 其余形态整条路由退回 pathRegex —— 因此上面每一条都必须与 be00e05 一致。
+static bool test_param_syntax_equivalence() {
+    TEST("复杂 :param 形态与 pathToRegex 等价（4 个反例 + 元字符/通配）");
+
+    struct Case {
+        const char* name;
+        const char* pattern;
+        const char* request;
+        bool expectHit;
+        const char* expectPairs;   // 期望参数，形如 "name=abc" 或 "a=1,b=2"；空 = 无参数
+    };
+    const Case cases[] = {
+        {"A :param 带静态后缀，请求命中且参数不含后缀", "/f/:name.json", "/f/abc.json", true,  "name=abc"},
+        {"B :param 带静态后缀，缺后缀不得命中",         "/f/:name.json", "/f/abc",      false, ""},
+        {"C 段中部 ':'（字面量锚点）",                  "/a/b:c",        "/a/bXYZ",     true,  "c=XYZ"},
+        {"D 同段两个 ':param'（旧实现只提交第一个）",   "/x/:a:b",       "/x/12",       true,  "a=1,b=2"},
+        {"E 静态段里的 '.' 必须按字面量匹配",           "/lit/a.b",      "/lit/axb",    false, ""},
+        {"F 静态段里的 '.' 命中字面量",                 "/lit/a.b",      "/lit/a.b",    true,  ""},
+        {"G 通配 '*' 匹配任意子路径",                   "/files/*",      "/files/a/b",  true,  ""},
+        {"H 通配 '*' 与静态段混合",                     "/files/*/meta", "/files/a/meta", true, ""},
+        {"I 纯 :param 基线",                            "/u/:id",        "/u/42",       true,  "id=42"},
+        {"J 空段不被 :param 吞掉",                      "/u/:id",        "/u/",         false, ""},
+    };
+
+    const auto splitPairs = [](const std::string& s) {
+        std::set<std::string> out;
+        std::size_t start = 0;
+        while (start <= s.size() && !s.empty()) {
+            std::size_t pos = s.find(',', start);
+            std::string tok = s.substr(start, pos == std::string::npos ? std::string::npos : pos - start);
+            if (!tok.empty()) out.insert(tok);
+            if (pos == std::string::npos) break;
+            start = pos + 1;
+        }
+        return out;
+    };
+
+    for (const Case& c : cases) {
+        router::Router rt;
+        bool hit = false;
+        std::set<std::string> gotPairs;
+        rt.get(c.pattern, [&hit, &gotPairs](const http::HttpRequest& req, http::HttpResponse&) {
+            hit = true;
+            for (const auto& kv : req.getParams()) gotPairs.insert(kv.first + "=" + kv.second);
+        });
+        http::HttpRequest r; r.parse(makeRequest("GET", c.request));
+        http::HttpResponse s; rt.handleRequest(r, s);
+
+        CHECK(hit == c.expectHit, c.name << ": 命中判定不符（hit=" << hit
+                                 << " status=" << s.getStatusCode() << "）");
+        const std::set<std::string> want = splitPairs(c.expectPairs);
+        if (gotPairs != want) {
+            std::string detail = "期望 {";
+            for (const auto& p : want) detail += p + ",";
+            detail += "} 实际 {";
+            for (const auto& p : gotPairs) detail += p + ",";
+            detail += "}";
+            FAIL(c.name << ": 参数不符（" << detail << "）");
+        }
+    }
+
+    // 注册顺序优先的另一个方向：静态命中注册在前 → 静态赢（哈希快路径生效）
+    {
+        router::Router rt;
+        std::string got;
+        rt.get("/users/me", [&got](const http::HttpRequest&, http::HttpResponse&) { got = "static"; });
+        rt.get("/users/:id", [&got](const http::HttpRequest& req, http::HttpResponse&) {
+            got = "dynamic";
+            auto it = req.getParams().find("id");
+            if (it != req.getParams().end()) got += ":" + it->second;
+        });
+        http::HttpRequest r; r.parse(makeRequest("GET", "/users/me"));
+        http::HttpResponse s; rt.handleRequest(r, s);
+        CHECK(got == "static", "静态命中注册在前时应赢, 实际 '" << got << "'");
+
+        // 同一张表里非静态的请求仍走动态路由
+        got.clear();
+        http::HttpRequest r2; r2.parse(makeRequest("GET", "/users/42"));
+        http::HttpResponse s2; rt.handleRequest(r2, s2);
+        CHECK(got == "dynamic:42", "非静态请求应由动态路由处理, 实际 '" << got << "'");
+    }
+
+    PASS();
+    return true;
+}
+
 static bool test_not_found_custom_handler() {
     TEST("自定义 404 handler 被调用");
     router::Router router;
@@ -316,7 +423,8 @@ int main() {
     run(test_dynamic_route_param_extraction, "动态路由参数提取");
     run(test_multiple_dynamic_params,      "多个动态参数");
     run(test_wildcard_route,               "通配符路由");
-    run(test_match_index_equivalence,      "匹配索引等价性");
+    run(test_match_index_semantics,        "匹配索引语义");
+    run(test_param_syntax_equivalence,     "复杂 :param 形态等价性");
     run(test_404_not_found,               "404 未找到");
     run(test_method_based_routing,         "方法分发");
     run(test_query_params,                 "查询参数");
