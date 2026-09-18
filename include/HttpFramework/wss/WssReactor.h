@@ -41,6 +41,9 @@ struct WssReactorState {
     // 心跳与出站冲刷只遍历这个集合：升级中的连接（tls_done=false）与正在关闭
     // 的连接（closing=true）都不会被转发/心跳触及，原来每轮 timer/wake 都要
     // 遍历全部连接并逐个判断这两个标志（连接数上千时是 O(N) 无效遍历）。
+    // 注意：**空闲回收不看这个集合** —— 它必须遍历全部 conns，否则未握手/
+    // 未升级的半开连接永远不会被回收（fd + SSL* 长期泄漏）。见 reactorLoop
+    // 的 timer 分支。
     // 只在 I/O 线程读写（连接建立、握手完成、关闭路径都发生在该线程）。
     std::unordered_set<int> activeFds;
     uint64_t nextConnId{1};
@@ -80,6 +83,9 @@ public:
     // 测试用：把新连接的 SO_SNDBUF 收窄，强制 SSL_write 走"只写出一部分 →
     // 挂 EPOLLOUT 续发"的路径（默认 0 = 不动，按内核默认值）
     void setSocketSendBuffer(int bytes) { socketSendBuf_ = bytes; }
+    // 同时持有的连接上限（含未握手/未升级的半开连接）。到顶后新连接被立即关闭，
+    // 保证瞬时洪峰不会打爆 fd 表（空闲回收有 1s 定时器粒度，挡不住洪峰）。
+    void setMaxConnections(int n) { maxConns_ = n > 0 ? n : 1; }
 
     // 从线程池回调，唤醒 IO 线程冲刷出站队列
     void notifyOutbound();
@@ -103,9 +109,8 @@ private:
     std::atomic<bool> running_{false};
     std::thread reactorThread_;
 
-    int wsIdleTimeoutSec_ = 120;
-    int wsPingIntervalSec_ = 0;
     int socketSendBuf_ = 0;   // 0 = 不设置（内核默认）
+    int maxConns_ = 4096;     // 同时持有的连接上限（见 setMaxConnections）
 };
 
 }  // namespace wss

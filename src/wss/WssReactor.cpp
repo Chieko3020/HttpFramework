@@ -621,8 +621,14 @@ void WssReactor::setWsRouter(std::shared_ptr<WsRouter> router) {
     st.wsRouter = wsRouter_.get();   // 断开路径要在 I/O 线程回调 onClose（H11）
 }
 void WssReactor::setFileTransferPlugin(std::shared_ptr<FileTransferPlugin> ftp) { ftPlugin_ = std::move(ftp); }
-void WssReactor::setWsIdleTimeout(int s) { st.idleTimeoutSec = s > 0 ? s : 120; }
-void WssReactor::setWsPingInterval(int s) { st.pingIntervalSec = s > 0 ? s : 40; }
+// 空闲超时：0/负数 = 用默认 120s；正数生效（下限 5s，避免把连接做成"建完即关"）。
+// 生效路径：本函数直接写 st.idleTimeoutSec，start() 不再用私有成员覆盖它 ——
+// 之前 start() 用 wsIdleTimeoutSec_(120) 覆盖，导致 setter 完全无效
+// （测试以为设了 30s，实际恒 120s，超时相关用例假绿）。
+void WssReactor::setWsIdleTimeout(int s) { st.idleTimeoutSec = s > 0 ? std::max(5, s) : 120; }
+// 心跳间隔：0/负数 = 由 start() 按 idle/3 自动推导（保底 5s）。
+// 正整数则用户显式指定，start() 只保证它 < idle（否则心跳先于回收触发，没意义）。
+void WssReactor::setWsPingInterval(int s) { st.pingIntervalSec = s > 0 ? s : 0; }
 void WssReactor::setTlsConfig(const TlsConfig& cfg) { tlsConfig_ = cfg; }
 void WssReactor::notifyOutbound() { notifyIoThreadOutbound(st.wake_fd); }
 
@@ -634,8 +640,10 @@ bool WssReactor::start() {
         if (tlsConfig_.certFile.empty())  tlsConfig_.certFile = certFile_;
         if (tlsConfig_.keyFile.empty())   tlsConfig_.keyFile  = keyFile_;
 
-        int idle = wsIdleTimeoutSec_ > 0 ? wsIdleTimeoutSec_ : 120;
-        int pingIv = wsPingIntervalSec_ > 0 ? wsPingIntervalSec_ : std::max(5, idle / 3);
+        // 超时/心跳：以 st 上的当前值为准（构造函数默认 + setWsIdleTimeout/
+        // setWsPingInterval 的显式设置）。不要用私有成员覆盖，否则 setter 无效。
+        const int idle = st.idleTimeoutSec > 0 ? st.idleTimeoutSec : 120;
+        int pingIv = st.pingIntervalSec > 0 ? st.pingIntervalSec : std::max(5, idle / 3);
         if (pingIv >= idle) pingIv = std::max(5, idle / 2);
         st.idleTimeoutSec = idle;
         st.pingIntervalSec = pingIv;
@@ -730,10 +738,17 @@ void WssReactor::reactorLoop() {
                 auto now = std::chrono::steady_clock::now();
                 const auto pingIv = std::chrono::seconds(st.pingIntervalSec);
 
-                // 合并成一次遍历（原来三次全表遍历：发心跳、flushOutbound、判空闲）。
-                // 心跳与冲刷只针对活跃连接，关闭态连接单独收集并清理。
+                // 两个职责必须分开遍历，不能都挂在 activeFds 上：
+                //   * 心跳 / 出站冲刷 / 关闭收尾 → 只对 activeFds（已握手连接）做；
+                //   * **空闲回收** → 必须遍历全部连接（st.conns）。
+                // 回收曾与心跳合并进 activeFds 循环，而未握手（TLS 没完成）或
+                // 已握手但未升级的连接都不在 activeFds 里，于是这类半开连接永远
+                // 不会被回收：fd + SSL* + 读缓冲长期滞留，conns 无上限
+                // （slowloris 型资源耗尽）。旧实现是遍历 st.conns 判 last_ping，
+                // 这里恢复该职责，同时保留 activeFds 对心跳的开销优势。
                 std::vector<std::shared_ptr<WssConnection>> toFlush;
                 std::vector<int> toClose;
+                std::unordered_set<int> closingSeen;   // 上面已判定收尾的连接
                 for (int cfd : st.activeFds) {
                     auto it = st.conns.find(cfd);
                     if (it == st.conns.end()) continue;
@@ -745,7 +760,7 @@ void WssReactor::reactorLoop() {
                             std::lock_guard<std::mutex> lk(s.outbound_mu);
                             drained = s.outbound.empty();
                         }
-                        if (drained || now > s.close_deadline) toClose.push_back(cfd);
+                        if (drained || now > s.close_deadline) { toClose.push_back(cfd); closingSeen.insert(cfd); }
                         continue;
                     }
                     if (!s.tls_done || !s.ws_upgraded) continue;
@@ -761,10 +776,19 @@ void WssReactor::reactorLoop() {
                         s.last_server_ping_sent = now; s.last_ping = now;
                         updateInterest(st.epoll_fd, cfd, true);
                     }
-                    auto diff = std::chrono::duration_cast<std::chrono::seconds>(now - s.last_ping);
-                    if (diff.count() > st.idleTimeoutSec) { toClose.push_back(cfd); continue; }
                     toFlush.push_back(c);
                 }
+
+                // 空闲回收：全部连接（含未握手 / 未升级）。心跳刚刷新过 last_ping
+                // 的连接 diff=0，不会重复进入回收。
+                for (auto& [cfd, c] : st.conns) {
+                    auto& s = c->state;
+                    if (s.closing) continue;               // 关闭态由上面的收尾逻辑处理
+                    if (closingSeen.count(cfd)) continue;  // 已判定收尾，不重复
+                    auto diff = std::chrono::duration_cast<std::chrono::seconds>(now - s.last_ping);
+                    if (diff.count() > st.idleTimeoutSec) toClose.push_back(cfd);
+                }
+
                 for (auto& c : toFlush) flushOutbound(&st, c);
                 for (int cfd : toClose) closeConnection(&st, cfd);
 
@@ -815,6 +839,13 @@ void WssReactor::reactorLoop() {
                     sockaddr_in peer; socklen_t peer_len = sizeof(peer);
                     int cfd = ::accept(st.listen_fd, reinterpret_cast<sockaddr*>(&peer), &peer_len);
                     if (cfd < 0) { if (errno == EAGAIN || errno == EWOULDBLOCK) break; break; }
+                    // 连接上限：空闲回收虽然能收回半开连接，但回收有 1s 定时器
+                    // 粒度，瞬时洪峰仍可能打爆 fd 表。到顶后直接关掉新连接（不做
+                    // TLS 握手、不进 conns），让对端立刻看到 RST/FIN。
+                    if (st.conns.size() >= static_cast<std::size_t>(maxConns_)) {
+                        ::close(cfd);
+                        continue;
+                    }
                     if (setNonBlocking(cfd) < 0) { ::close(cfd); continue; }
                     if (socketSendBuf_ > 0) {
                         // 测试用：收窄发送缓冲，让大帧必然出现"部分写"（见 setSocketSendBuffer）
