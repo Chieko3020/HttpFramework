@@ -214,7 +214,14 @@ static bool test_enqueue_detached_rejects_empty() {
         threw = true;
     }
     CHECK(threw, "空 std::function 应抛 std::invalid_argument");
-    CHECK(pool.getQueueSize() == 0, "被拒的任务不应进入队列, 实际 " << pool.getQueueSize());
+    // 队列里只应剩那 1 个正常任务（不能因为被拒的任务而变多）。
+    // 注意不能直接断言 ==1 后立刻读：worker 随时会把任务取走，这里等它被取走。
+    std::size_t qsz = pool.getQueueSize();
+    for (int i = 0; i < 50 && qsz > 1; ++i) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        qsz = pool.getQueueSize();
+    }
+    CHECK(qsz <= 1, "被拒的任务不应进入队列, 实际队列长度 " << qsz);
 
     // 看门狗：3s 还没等到计数归零即判失败（不能真挂死测试进程）
     std::atomic<bool> done{false};

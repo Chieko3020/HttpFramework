@@ -719,15 +719,18 @@ cmake --build build --target run_tests
 | `test_infra_threadpool` | 线程池：入队/批量/队列/关闭/状态 | 7 |
 | `test_infra_mempool` | 内存池：分配/FIFO/耗尽/RAII/统计 | 11 |
 | `test_infra_logger` | 日志系统：级别过滤/模块过滤/输出 | 6 |
-| `test_http_route` | 路由匹配：静态/动态/通配符/404/方法 | 9 |
+| `test_http_route` | 路由匹配：静态/动态/通配符/:param 形态等价性/404/方法 | 11 |
 | `test_http_middleware` | 中间件链：洋葱模型/路径过滤/鉴权 | 6 |
 | `test_http_session` | 会话管理：CRUD/过期/清理/Cookie | 11 |
 | `test_http_response` | 响应构建：HTML/JSON/File/Binary/重定向 | 12 |
 | `test_http_template` | 模板引擎：加载/变量替换/fallback | 5 |
-| `test_http_db` | 数据库连接池：初始化/获取/查询/计数 | 5 |
+| `test_http_db` | 数据库连接池：初始化/获取/查询/计数/TCP 探测 | 6 |
 | `test_edge_input` | 异常输入：Header过大/路径穿越/畸形请求 | 6 |
 | `test_edge_cert` | 证书异常：不匹配/缺失/空路径 (需 WSS) | 5 |
 | `test_edge_stress` | 并发压力：1000请求/统计/重启/fd泄露 | 4 |
+| `test_http_hardening` | 加固回归：信号/管线化/框架头/慢速滴灌/畸形请求 (H1-H15) | 20 |
+| `test_wss_hardening` | WSS 回归：升级校验/onClose/分片上限/出站顺序/半开连接回收 (需 WSS) | 10 |
+| `test_wss_router` | WsRouter 计划缓存生命周期与失效 (需 WSS) | 3 |
 
 ### 性能基准测试
 
