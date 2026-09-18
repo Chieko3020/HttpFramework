@@ -77,6 +77,21 @@ public:
     // 缓冲区截断检测（内存池单块容量不足时置位）
     bool isTruncated() const { return truncated_; }
 
+    // ── 在途请求计数（H4）──
+    // "该连接上有一个请求已被派发给业务线程、响应尚未发出"。
+    // 空闲超时清理必须跳过这类连接：慢 handler（超过 idleTimeout）不代表连接空闲，
+    // 关掉它既会杀掉正常请求，也会打开 fd 复用后被陈旧回调误杀的窗口。
+    // 计数由 I/O 线程在派发时递增（含"已入队未开始"），由任务结束时递减。
+    void enterInFlight() { inFlight_.fetch_add(1, std::memory_order_relaxed); }
+    void leaveInFlight() {
+        int prev = inFlight_.fetch_sub(1, std::memory_order_relaxed);
+        if (prev <= 0) {
+            // 计数不应为负：为负说明配对错误，钳回 0 避免永久"看起来在途"
+            inFlight_.store(0, std::memory_order_relaxed);
+        }
+    }
+    int inFlightCount() const { return inFlight_.load(std::memory_order_relaxed); }
+
     // 连接代际（见 utils/SocketCompat.h）：同一 fd 号被复用时用于区分新旧连接
     void setConnectionGeneration(uint32_t generation) { connectionGeneration_ = generation; }
     uint32_t connectionGeneration() const { return connectionGeneration_; }
@@ -127,6 +142,9 @@ private:
     // 写入进度跟踪
     size_t writeOffset_;
     bool truncated_ = false;
+
+    // 在途请求计数（H4，见上方 enterInFlight 说明）
+    std::atomic<int> inFlight_{0};
 
     // 连接代际（同一 fd 号复用后的归属校验）
     uint32_t connectionGeneration_ = 0;

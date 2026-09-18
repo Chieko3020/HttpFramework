@@ -765,6 +765,9 @@ void HttpServer::enqueueRequestTask(int subReactorIndex, int clientFd, net::Conn
     stats_.totalRequests.fetch_add(1);
     stats_.queuedTasks.fetch_add(1);
 
+    // 该连接上有在途请求：空闲超时清理据此跳过它（H4）
+    markInFlight(subReactorIndex, connId, /*enter=*/true);
+
     auto task = std::make_shared<HttpRequestTask>(
         clientFd, request, response,
         [this, subReactorIndex, connId](int fd, std::shared_ptr<HttpRequest> req,
@@ -778,22 +781,46 @@ void HttpServer::enqueueRequestTask(int subReactorIndex, int clientFd, net::Conn
     // stop() 不会在它开始执行前就放行析构（H3）。
     inFlightTasks_.fetch_add(1, std::memory_order_acq_rel);
     try {
-        threadPool_->enqueue([this, task]() {
+        threadPool_->enqueue([this, subReactorIndex, connId, task]() {
             // 保证计数一定被递减：execute() 内的异常会逃到线程池的 catch，
             // 那就再也回不到 finishInFlightTask()（会把 stop() 卡到超时）
             try {
                 task->execute();
             } catch (...) {
             }
+            markInFlight(subReactorIndex, connId, /*enter=*/false);
             finishInFlightTask();
         });
     } catch (const std::exception& e) {
         // 线程池已关闭：撤销记账并撤销统计，不能把异常抛回 I/O 线程
         // （抛出会逃出 subReactorLoop，直接 std::terminate）
+        markInFlight(subReactorIndex, connId, /*enter=*/false);
         finishInFlightTask();
         stats_.queuedTasks.fetch_sub(1);
         std::cerr << "[ERROR][HTTP服务器]：提交任务失败（线程池可能已关闭）: "
                   << e.what() << std::endl;
+    }
+}
+
+// 按 (fd, 代际) 定位该连接当前的 HttpContext 并增减在途计数。
+// 连接已关闭 / fd 号已被新连接复用时静默返回：计数只对"仍然存在的那条连接"有意义。
+void HttpServer::markInFlight(int subReactorIndex, net::ConnId connId, bool enter) {
+    if (subReactorIndex < 0 ||
+        subReactorIndex >= static_cast<int>(subReactors_.size())) {
+        return;
+    }
+    auto& sr = subReactors_[subReactorIndex];
+    const int fd = net::connIdFd(connId);
+    const uint32_t gen = net::connIdGeneration(connId);
+
+    std::lock_guard<std::mutex> lock(sr->contextsMutex);
+    auto it = sr->contexts.find(fd);
+    if (it == sr->contexts.end()) return;
+    if (it->second->connectionGeneration() != gen) return;
+    if (enter) {
+        it->second->enterInFlight();
+    } else {
+        it->second->leaveInFlight();
     }
 }
 
@@ -809,9 +836,16 @@ void HttpServer::handleTimer(int subReactorIndex) {
 
     const auto now = std::chrono::steady_clock::now();
     std::vector<net::ConnId> idleConns;
+    size_t skippedInFlight = 0;
     {
         std::lock_guard<std::mutex> lock(sr->contextsMutex);
         for (auto& [fd, ctx] : sr->contexts) {
+            // 有请求在途（handler 仍在跑或仍在队列里）：本连接不空闲。
+            // 慢 handler 超过 idleTimeout 是正常的业务耗时，不能当成空闲连接杀掉（H4）。
+            if (ctx->inFlightCount() > 0) {
+                ++skippedInFlight;
+                continue;
+            }
             auto idle = std::chrono::duration_cast<std::chrono::seconds>(
                             now - ctx->lastActive())
                             .count();
@@ -820,6 +854,7 @@ void HttpServer::handleTimer(int subReactorIndex) {
             }
         }
     }
+    (void)skippedInFlight;
 
     for (net::ConnId id : idleConns) {
         std::cout << "[INFO][HTTP服务器]：空闲超时关闭连接, fd=" << net::connIdFd(id)

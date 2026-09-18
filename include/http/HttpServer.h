@@ -188,6 +188,8 @@ private:
     bool fdTakenByOther(int fd, int subReactorIndex) const;
     // 把 fd 从本 reactor 的 pendingWrites 中移除（连接关闭 / fd 被新连接复用）
     void dropPendingWrites(int subReactorIndex, int fd);
+    // 按 (fd, 代际) 增减该连接的在途请求计数（H4）
+    void markInFlight(int subReactorIndex, net::ConnId connId, bool enter);
     // 唤醒 sub reactor 去发送该连接的响应
     void notifyConnectionReady(int subReactorIndex, net::ConnId connId);
     // 取该 fd 当前连接代际（不存在时返回 0）

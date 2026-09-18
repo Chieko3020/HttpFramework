@@ -596,6 +596,42 @@ static bool test_stop_waits_for_inflight() {
     return true;
 }
 
+// ── H4：慢 handler 不得被空闲超时误杀 ──
+// timerfd 每 5s 走一轮空闲检查；连接上仍有在途请求（handler 还在跑）时不得关闭。
+static bool test_slow_handler_not_killed_by_timer() {
+    TEST("H4 handler 耗时超过 idleTimeout 不被空闲清理误杀");
+    auto entered = std::make_shared<std::atomic<int>>(0);
+
+    Fixture f;
+    if (!f.up(/*idleSec=*/1, /*subReactors=*/1, false, 4,
+              [entered](router::Router& r) {
+                  r.get("/h4slow", [entered](const http::HttpRequest&,
+                                             http::HttpResponse& res) {
+                      entered->fetch_add(1);
+                      std::this_thread::sleep_for(std::chrono::milliseconds(6500));
+                      res.setText("H4DONE");
+                  });
+              })) FAIL("服务器启动失败");
+
+    int s = connectTo(f.port);
+    CHECK(s >= 0, "连接失败");
+    CHECK(sendAll(s, req("GET", "/h4slow")), "发送失败");
+
+    // 修复前：t=5s 的 timer 看到 lastActive 停留在建连时刻（idle>=1s），
+    // 直接把还在等 handler 的连接关掉，客户端收到 EOF
+    auto r = readResponse(s, 10000);
+    std::cout << "(handler 进入=" << entered->load() << " 响应完整=" << r.complete
+              << " status='" << r.status << "') ";
+    CHECK(r.complete, "慢 handler 的连接在响应前被关闭（被空闲超时误杀）");
+    CHECK(r.status.rfind("HTTP/1.1 200", 0) == 0, "状态异常: " << r.status);
+    CHECK(r.body == "H4DONE", "响应体异常: " << r.body);
+
+    close(s);
+    f.down();
+    PASS();
+    return true;
+}
+
 int main() {
     std::cout << "=== test_http_hardening ===" << std::endl;
     ignoreSigpipeInTest();
@@ -614,6 +650,7 @@ int main() {
     run(test_payload_too_large,       "H1/H2 413 与统计");
     run(test_stale_fd_no_crosstalk,   "C2 陈旧 fd 防误杀");
     run(test_stop_waits_for_inflight, "H3 stop 排空在途任务");
+    run(test_slow_handler_not_killed_by_timer, "H4 慢 handler 不被误杀");
 
     std::cout << std::endl
               << "结果: " << g_testsPassed << " 通过, "
