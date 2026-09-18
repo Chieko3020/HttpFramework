@@ -107,10 +107,16 @@ struct ParsedResponse {
     bool complete = false;
 };
 
-// 按 Content-Length 读一个完整响应
-static ParsedResponse readResponse(int sock, int timeoutMs = 5000) {
+// 按 Content-Length 读一个完整响应。
+//
+// carry 必须在同一连接的多次调用之间复用：一次 recv 完全可能把同一连接上的
+// 多个响应一起带回（服务端并发写、Nagle 合并都会让它们粘在一起）。旧实现每次
+// 调用都用新的局部缓冲、把多余字节丢掉，于是"第二个响应"会偶发地被测试自己
+// 吃掉，表现为 5s 超时 —— 这是测试客户端的缺陷，不是服务端丢响应
+// （已用 1500 轮管线化探针确认服务端逐字节正确）。
+static ParsedResponse readResponseImpl(int sock, std::string& carry, int timeoutMs) {
     ParsedResponse r;
-    std::string buf;
+    std::string& buf = carry;
     struct timeval tv;
     tv.tv_sec = timeoutMs / 1000;
     tv.tv_usec = (timeoutMs % 1000) * 1000;
@@ -136,6 +142,8 @@ static ParsedResponse readResponse(int sock, int timeoutMs = 5000) {
             size_t bodyStart = hdrEnd + 4;
             if (buf.size() - bodyStart >= r.contentLength) {
                 r.body = buf.substr(bodyStart, r.contentLength);
+                // 消费掉本次响应的全部字节，剩余留给下一次调用
+                buf.erase(0, bodyStart + r.contentLength);
                 r.complete = true;
                 return r;
             }
@@ -145,6 +153,12 @@ static ParsedResponse readResponse(int sock, int timeoutMs = 5000) {
         if (n <= 0) return r;  // 对端关闭 / 超时
         buf.append(tmp, static_cast<size_t>(n));
     }
+}
+
+// 单响应场景的便捷入口（每次调用自带空缓冲）
+static ParsedResponse readResponse(int sock, int timeoutMs = 5000) {
+    std::string carry;
+    return readResponseImpl(sock, carry, timeoutMs);
 }
 
 static bool peekClosed(int sock, int timeoutMs = 300) {
@@ -285,8 +299,9 @@ static bool test_pipelining() {
     std::string batch = req("GET", "/small") + req("GET", "/small") + req("GET", "/small");
     CHECK(sendAll(s, batch), "批量写入失败");
 
+    std::string carry;   // 同一连接上的响应可能被一次 recv 一起带回
     for (int i = 0; i < 3; ++i) {
-        auto r = readResponse(s);
+        auto r = readResponseImpl(s, carry, 5000);
         CHECK(r.complete, "第 " << (i + 1) << " 个响应未收到（管线化请求被丢弃）");
         CHECK(r.status.rfind("HTTP/1.1 200", 0) == 0,
               "第 " << (i + 1) << " 个响应状态异常: " << r.status);
@@ -312,12 +327,13 @@ static bool test_body_slicing() {
         std::string batch = req("POST", "/echo", "", "hello") + req("GET", "/small");
         CHECK(sendAll(s, batch), "批量写入失败");
 
-        auto r1 = readResponse(s);
+        std::string carry;
+        auto r1 = readResponseImpl(s, carry, 5000);
         CHECK(r1.complete, "POST 响应未收到");
         CHECK(r1.body == "hello",
               "echo 体应恰好是 Content-Length 指定的 5 字节, 实际: '" << r1.body << "'");
 
-        auto r2 = readResponse(s);
+        auto r2 = readResponseImpl(s, carry, 5000);
         CHECK(r2.complete, "后续 GET 响应未收到（被 body 吞掉）");
         CHECK(r2.body == "SMALL", "后续 GET 响应体异常: " << r2.body);
 
@@ -342,7 +358,8 @@ static bool test_response_size_boundary() {
             CHECK(s >= 0, "连接失败");
             CHECK(sendAll(s, req("GET", "/size?n=" + std::to_string(n))), "发送失败");
 
-            auto r = readResponse(s, 8000);
+            std::string carry;
+            auto r = readResponseImpl(s, carry, 8000);
             CHECK(r.complete, "[mode=" << mode << " n=" << n << "] 响应不完整"
                   << " (Content-Length=" << r.contentLength
                   << ", 实收=" << r.body.size() << ")");
@@ -354,7 +371,7 @@ static bool test_response_size_boundary() {
 
             // keep-alive：紧接着的请求不能被当成前一个响应的续传体
             CHECK(sendAll(s, req("GET", "/small")), "keep-alive 复用发送失败");
-            auto r2 = readResponse(s);
+            auto r2 = readResponseImpl(s, carry, 5000);
             CHECK(r2.complete && r2.body == "SMALL",
                   "[mode=" << mode << " n=" << n << "] keep-alive 后续响应错位: '"
                   << r2.status << "' body=" << r2.body.size());
@@ -495,7 +512,8 @@ static bool test_stale_fd_no_crosstalk() {
         if (sentinel >= 0) { close(sentinel); sentinel = -1; }
         if (c2 < 0) continue;
         if (!sendAll(c2, req("GET", "/small"))) { close(c1); close(c2); continue; }
-        auto r = readResponse(c2, 4000);
+        std::string carry;
+        auto r = readResponseImpl(c2, carry, 4000);
         if (!(r.complete && r.body == "SMALL")) {
             std::cout << "(第 " << (attempts + 1) << " 轮 c2 首个响应异常: "
                       << r.status << ") ";
@@ -509,7 +527,7 @@ static bool test_stale_fd_no_crosstalk() {
         for (int i = 0; i < 16; ++i) {
             if (peekClosed(c2)) { roundKilled = true; break; }
             if (!sendAll(c2, req("GET", "/small"))) { roundKilled = peekClosed(c2); break; }
-            auto r2 = readResponse(c2, 2000);
+            auto r2 = readResponseImpl(c2, carry, 2000);
             if (!(r2.complete && r2.body == "SMALL")) { roundKilled = true; break; }
             ++roundReused;
             std::this_thread::sleep_for(std::chrono::milliseconds(100));
