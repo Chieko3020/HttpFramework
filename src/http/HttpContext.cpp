@@ -46,6 +46,24 @@ void HttpContext::clear() {
     writeOffset_ = 0;
 }
 
+void HttpContext::resetForNextRequest() {
+    // 注意：不清空请求缓冲——其中可能还有同一连接的下一个请求字节
+    request_ = HttpRequest();
+    response_ = HttpResponse();
+    userData_.clear();
+
+    if (useMemoryPool_) {
+        if (responseBuffer_) {
+            responseBuffer_->clear();
+        }
+    } else {
+        responseData_.clear();
+    }
+
+    writeOffset_ = 0;
+    truncated_ = false;
+}
+
 void HttpContext::appendData(const std::string& data) {
     if (useMemoryPool_) {
         if (!requestBuffer_) {

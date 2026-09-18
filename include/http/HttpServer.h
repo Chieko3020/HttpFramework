@@ -46,6 +46,10 @@ public:
     void enableMemoryPool(bool enable = true);
     bool isMemoryPoolEnabled() const { return useMemoryPool_; }
 
+    // 空闲连接超时（秒）；<=0 表示不启用超时清理
+    void setIdleTimeout(int seconds) { idleTimeoutSec_ = seconds; }
+    int idleTimeout() const { return idleTimeoutSec_; }
+
     static bool isPortInUse(int port);
 
     struct Statistics {
@@ -62,6 +66,7 @@ private:
     struct SubReactor {
         int epollFd = -1;
         int wakeFd = -1;           // eventfd, 跨线程通知 sub reactor 有响应待发送
+        int timerFd = -1;          // timerfd, 周期性触发空闲连接清理
         std::thread thread;
         std::map<int, std::unique_ptr<HttpContext>> contexts;
         std::mutex contextsMutex;
@@ -103,6 +108,9 @@ private:
     // 内存池配置
     bool useMemoryPool_;
 
+    // 空闲连接超时（秒）
+    int idleTimeoutSec_{60};
+
     // ---- 初始化 ----
     bool initializeServer();
     bool setupMainEpoll();
@@ -118,6 +126,8 @@ private:
     void handleRead(int clientFd, int subReactorIndex);
     void handleWrite(int clientFd, int subReactorIndex);
     void handleWake(int subReactorIndex);   // 处理 eventfd 唤醒，批量发送响应
+    void handleTimer(int subReactorIndex);  // 处理 timerfd 到期，清理空闲连接
+    void dispatchBufferedRequests(int clientFd, int subReactorIndex);
     void closeConnection(int fd, int subReactorIndex);
 
     // ---- 业务处理（线程池中执行） ----

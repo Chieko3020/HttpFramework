@@ -1,5 +1,6 @@
 #pragma once
 
+#include <chrono>
 #include <memory>
 #include <string>
 #include <unordered_map>
@@ -27,8 +28,16 @@ public:
     const std::string& getUserData(const std::string& key) const;
     bool hasUserData(const std::string& key) const;
     
-    // 清空上下文
+    // 清空上下文并重置连接状态（连接关闭时使用）
     void clear();
+
+    // 长连接复用：清空请求/响应对象与响应缓冲，但保留 clientFd 与请求缓冲
+    // （请求缓冲中可能已缓存同一连接的下一个请求——粘包 / pipelining）
+    void resetForNextRequest();
+
+    // 空闲超时判定用的活跃时间戳
+    void touch() { lastActive_ = std::chrono::steady_clock::now(); }
+    std::chrono::steady_clock::time_point lastActive() const { return lastActive_; }
     
     // 设置客户端文件描述符
     void setClientFd(int fd) { clientFd_ = fd; }
@@ -88,6 +97,9 @@ private:
     // 写入进度跟踪
     size_t writeOffset_;
     bool truncated_ = false;
+
+    // 最近一次 I/O 活跃时间（空闲超时清理用）
+    std::chrono::steady_clock::time_point lastActive_{std::chrono::steady_clock::now()};
 };
 
 } // namespace http

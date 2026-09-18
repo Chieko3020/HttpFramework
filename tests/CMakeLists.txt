@@ -41,6 +41,10 @@ add_executable(test_http_template test_http_template.cpp)
 target_link_libraries(test_http_template PRIVATE http_framework)
 target_compile_definitions(test_http_template PRIVATE ${TEST_DEFS})
 
+add_executable(test_http_keepalive test_http_keepalive.cpp)
+target_link_libraries(test_http_keepalive PRIVATE http_framework)
+target_compile_definitions(test_http_keepalive PRIVATE ${TEST_DEFS})
+
 add_executable(test_http_db test_http_db.cpp)
 target_link_libraries(test_http_db PRIVATE http_framework)
 target_compile_definitions(test_http_db PRIVATE ${TEST_DEFS})
@@ -79,6 +83,7 @@ set(ALL_TESTS
     test_http_session
     test_http_response
     test_http_template
+    test_http_keepalive
     test_http_db
     test_edge_input
     test_edge_stress
