@@ -19,7 +19,8 @@ PORT="${WSS_PORT:-18990}"
 CONNS="${1:-32}"
 PER_CONN="${2:-2000}"
 SIZE="${3:-1024}"
-OUT="$ROOT/results/wss_concurrent_$(date +%Y%m%d_%H%M).txt"
+# WSS_OUT 可显式指定输出文件：多轮复现时把各轮追加到同一文件，便于直接看轮间波动
+OUT="${WSS_OUT:-$ROOT/results/wss_concurrent_$(date +%Y%m%d_%H%M).txt}"
 mkdir -p "$ROOT/results"
 
 [ -x "$CLIENT" ] || { echo "缺 $CLIENT（先 cmake -S . -B build-wss -DENABLE_WSS=ON && cmake --build build-wss）"; exit 3; }
