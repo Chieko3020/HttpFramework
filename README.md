@@ -1,17 +1,13 @@
 # HttpFramework
 
-- Linux 下 C++ HTTP/1.1 + WSS (WebSocket + TLS 1.3) 服务框架，基于多 Reactor + 线程池架构（main Reactor accept + sub Reactor I/O + WSS 独立 Reactor + 共享线程池），实现 C++ 项目快速导入并搭载 HTTP 服务
-- epoll ET 模式 + 非阻塞 I/O，支持高并发
-- WSS 扩展：TLS 1.3 加密、WebSocket 全双工通信、0-RTT Early Data、会话复用、文件分片断点续传（可选启用）
-- 路由系统：HTTP 静态路由/动态路由（`:id`）/通配符 + WSS 路径路由
-- 中间件系统：HTTP 链式中间件 + WSS 消息中间件，支持路径过滤
-- 会话管理：Session/Cookie 完整生命周期管理，自动过期清理，线程安全
-- MySQL 连接池：连接复用、健康检查、事务支持，简化数据库操作
-- 固定大小内存池：12KB 块，零动态分配，避免内存碎片，线程安全
-- 统一日志格式：`[INFO][模块]：消息` 四级日志（INFO/WARN/ERROR/DEBUG）
-- 开发环境：WSL Ubuntu 24.04 LTS & Visual Studio Code, CMake 3.28.3 & MySQL 8.0.42
+## 项目描述
 
-> WebSocket 模块来源于 [WebsocketServer](https://github.com/Chieko3020/WebsocketServer)
+HttpFramework 是一个 C++17 的 HTTP 服务框架，可选启用 WebSocket + TLS 1.3 扩展。
+它覆盖从 socket 到业务处理的完整一层：多 Reactor 网络层、HTTP/1.1 解析与响应构造、
+路由匹配、链式中间件、会话管理，以及基于线程池的异步处理模型。网络层由本项目实现，
+不引入第三方网络库；接入方式是一个 CMake 目标，可以被 `find_package(HttpFramework)` 引入。
+
+规模约 9500 行（`src/` + `include/`）；测试默认构建 12 个 ctest 目标，启用 WSS 后 15 个。
 
 ## 快速开始
 
@@ -21,867 +17,418 @@
 # 必需
 sudo apt install build-essential cmake libboost-all-dev
 
-# 可选：数据库支持
+# 可选：数据库支持（未安装时相关功能与测试自动跳过）
 sudo apt install libmysqlcppconn-dev
 
-# 可选：WSS 扩展 (TLS 1.3 + WebSocket)
+# 可选：WSS 扩展（TLS 1.3 + WebSocket），需要 OpenSSL 3.x
 sudo apt install libssl-dev
 
-# 可选：性能基准测试
-sudo apt install wrk bc
-# WSS 基准测试还需: npm install -g wscat
+# 可选：性能基准
+sudo apt install wrk
 ```
 
-MySQL Connector/C++ 可选 — 未安装时数据库功能自动禁用。
-OpenSSL 3.x 可选 — 仅启用 `ENABLE_WSS` 时需要。
-`wrk`、`bc`、`wscat` 仅用于性能基准测试脚本。
-
-### 编译 & 运行
+### 构建
 
 ```bash
-# 基础编译（仅 HTTP）
-cmake -S . -B build && cmake --build build
-./build/examples/hello_world     # 最简示例（无 DB 依赖，4 个路由）
-./build/examples/full_demo       # 完整演示（路由/会话/DB/模板，MySQL 不可用时自动降级）
+# 基础构建（仅 HTTP）
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build -j
 
-# 启用 WSS 扩展（需要 OpenSSL 3.x）
-cmake -S . -B build -DENABLE_WSS=ON && cmake --build build
-# 生成自签名证书
-openssl req -x509 -newkey rsa:2048 -keyout certs/server_key.pem \
-    -out certs/server_cert.pem -days 365 -nodes -subj "/CN=localhost"
-./build/examples/wss_echo        # HTTP :8080 + WSS :9443
+# 启用 WSS 扩展
+cmake -S . -B build-wss -DCMAKE_BUILD_TYPE=Release -DENABLE_WSS=ON
+cmake --build build-wss -j
 ```
 
-访问 `http://localhost:8080`，WebSocket 演示连接 `wss://localhost:9443`
-
-### 作为库安装
-
-```bash
-cmake --install build --prefix /usr/local
-```
-
-之后外部项目可通过 `find_package(HttpFramework REQUIRED)` 直接引用。
-
-## WSS 扩展（可选）
-
-启用 `ENABLE_WSS` 后，框架同时支持 HTTP REST API 和 WebSocket 实时通信，同一进程、同一端口空间、共享线程池。
-
-### WSS 最小示例
+### 最小可运行示例
 
 ```cpp
 #include "HttpFramework.h"
-int main() {
-    http::App app;
-
-    app.get("/", [](auto&, auto& res) {
-        res.setHtml("<h1>HTTP + WSS</h1>");
-    });
-
-    // 启用 WSS，注册 echo 处理器
-    app.enableWss(9443, "certs/server_cert.pem", "certs/server_key.pem")
-       .ws("/", [](http::WssConnection& conn, const http::wss::WsMessage& msg) {
-            conn.sendText("Echo: " + msg.text());
-       });
-
-    app.start(8080);  // HTTP :8080 + WSS :9443
-}
-```
-
-### WSS 连接生命周期
-
-```cpp
-app.onWsOpen("/chat", [](http::WssConnection& conn) {
-    std::cout << "client joined, id=" << conn.id() << std::endl;
-});
-app.onWsClose("/chat", [](http::WssConnection& conn, uint16_t code) {
-    std::cout << "client left, code=" << code << std::endl;
-});
-```
-
-### WSS 中间件
-
-```cpp
-// 全局鉴权 — 拦截所有 WSS 连接
-app.useWs([](http::WssConnection& conn, http::wss::WsMessage& msg,
-             std::function<void()> next) {
-    if (!conn.hasUserData("user_id")) { conn.close(4001); return; }
-    next();
-});
-```
-
-### WssConnection API
-
-| 方法 | 说明 |
-|------|------|
-| `sendText(text)` | 发送文本帧 |
-| `sendBinary(data)` | 发送二进制帧 |
-| `close(code)` | 关闭连接（默认 1000） |
-| `id()` | 连接唯一 ID |
-| `isOpen()` | 连接是否存活 |
-| `setUserData(k, v)` / `getUserData(k)` | 连接级键值存储 |
-
-## 两种使用方式
-
-推荐使用 `http::App` 类，将 Router、HttpServer、SessionManager、DbConnectionPool 封装在一起，提供链式 API，大幅减少样板代码。
-
-### 方式一：编写代码
-
-#### 最简服务器
-
-```cpp
-#include "HttpFramework.h"
-int main() {
-    http::App app;
-    app.get("/", [](auto& req, auto& res) {
-        res.setHtml("<h1>Hello, HttpFramework!</h1>");
-    });
-    app.start(8080);
-}
-```
-
-#### 完整功能服务器
-
-```cpp
-#include "HttpFramework.h"
-#include "utils/TemplateLoader.h"
 
 int main() {
     http::App app;
 
-    app.enableLogging()
-       .enableSession()
-       .enableMemoryPool();
-
-    app.get("/", [](auto& req, auto& res) {
-        res.setHtml(utils::TemplateLoader::loadTemplate("index.html"));
+    app.get("/", [](const http::HttpRequest&, http::HttpResponse& res) {
+        res.setJson(R"({"message":"hello"})");
     });
 
-    app.get("/api/hello", [](auto& req, auto& res) {
-        res.setJson(R"({"message": "Hello from HttpFramework!"})");
+    app.get("/users/:id", [](const http::HttpRequest& req, http::HttpResponse& res) {
+        res.setJson(R"({"id":")" + req.getParam("id") + R"("})");
     });
 
-    app.get("/users/:id", [](auto& req, auto& res) {
-        res.setJson(R"({"user_id": ")" + req.getParam("id") + R"("})");
-    });
-
-    app.get("/session", [&app](auto& req, auto& res) {
-        auto s = app.sessionManager()->getSession(req.getUserData("session"));
-        int count = s && s->has("visits") ? std::stoi(s->get("visits")) + 1 : 1;
-        if (s) s->set("visits", std::to_string(count));
-        res.setJson(R"({"visits": )" + std::to_string(count) + "}");
-    });
-
-    app.notFound([](auto& req, auto& res) {
-        res.setStatus(http::HttpStatus::NOT_FOUND);
-        res.setJson(R"({"error": "Not Found"})");
-    });
-
-    app.start(8080, 4);
+    return app.run(8080);
 }
 ```
 
-#### 自定义中间件
+编译并运行，然后 `curl http://127.0.0.1:8080/users/42`。更多示例见
+`examples/hello_world.cpp`、`examples/full_demo.cpp`（含中间件、会话、模板、数据库），
+以及 `examples/wss_echo.cpp`（WebSocket 回声服务）。
 
-```cpp
-// 全局中间件 — 请求日志
-app.use([](const http::HttpRequest& req, http::HttpResponse& res, std::function<void()> next) {
-    std::cout << req.getMethodString() << " " << req.getPath() << std::endl;
-    next();
-});
-
-// 路径特定中间件 — API 认证
-app.use("/api", [](const http::HttpRequest& req, http::HttpResponse& res, std::function<void()> next) {
-    if (req.getHeader("authorization").empty()) {
-        res.setStatus(http::HttpStatus::UNAUTHORIZED);
-        res.setJson(R"({"error": "Unauthorized"})");
-        return;
-    }
-    next();
-});
-
-// 自定义响应头
-app.use([](const http::HttpRequest& req, http::HttpResponse& res, std::function<void()> next) {
-    res.setHeader("X-Powered-By", "HttpFramework");
-    next();
-});
-```
-
-#### 数据库集成
-
-```cpp
-http::App app;
-
-// 启用数据库（失败时自动降级，服务器正常启动）
-app.enableDatabase("localhost", "root", "password", "mydb");
-
-app.get("/db/users", [&app](auto& req, auto& res) {
-    auto pool = app.dbPool();
-    if (!pool) {
-        res.setJson(R"({"error": "Database not available"})");
-        return;
-    }
-    auto conn = pool->getConnection();
-    if (!conn) {
-        res.setStatus(http::HttpStatus::INTERNAL_SERVER_ERROR);
-        res.setJson(R"({"error": "Failed to get connection"})");
-        return;
-    }
-    try {
-        auto result = conn->executeQuery("SELECT * FROM users");
-        // ... 处理结果 ...
-        pool->returnConnection(conn);
-    } catch (const std::exception& e) {
-        pool->returnConnection(conn);
-        res.setStatus(http::HttpStatus::INTERNAL_SERVER_ERROR);
-        res.setJson(R"({"error": ")" + std::string(e.what()) + R"("})");
-    }
-});
-```
-
-#### App 配置一览
-
-| 方法 | 默认值 | 说明 |
-|------|--------|------|
-| `enableLogging()` | — | 请求日志中间件 |
-| `enableSession(expire, cleanup)` | 1800s, 300s | 会话管理 + 后台自动清理 |
-| `enableMemoryPool()` | — | 12KB 固定块内存池 |
-| `enableDatabase(host, user, pass, db, port, max)` | port=3306, max=5 | MySQL 连接池（可选） |
-| `enableWss(port, cert, key)` | — | WSS 扩展：TLS 1.3 + WebSocket（需 `ENABLE_WSS=ON`） |
-| `ws(path, handler)` | — | 注册 WSS 消息处理器 |
-| `useWs(middleware)` | — | 注册 WSS 中间件（全局/路径） |
-| `onWsOpen(path, handler)` | — | WSS 连接建立回调 |
-| `onWsClose(path, handler)` | — | WSS 连接关闭回调 |
-| `start(port, threads)` | threads=4 | 启动服务器（HTTP + WSS）并阻塞等待信号 |
-
-需要完全控制时，通过 `app.router()`、`app.sessionManager()`、`app.dbPool()`、`app.stats()` 直接操作底层对象。
-
-### 方式二：底层 API
-
-直接使用 `HttpServer`、`Router`、`SessionManager`、`DbConnectionPool` 等底层类，自由组装。参考 `examples/full_demo.cpp`，展示了手动管理信号处理、全局资源生命周期、端口检测等用法。
-
-## 外部项目集成
-
-HttpFramework 安装后可作为 CMake 包被外部项目引用。
+### 集成到现有项目
 
 ```cmake
-# 外部项目的 CMakeLists.txt
-cmake_minimum_required(VERSION 3.16)
-project(MyWebApp LANGUAGES CXX)
-set(CMAKE_CXX_STANDARD 17)
-
+# 方式一：安装后按包引用
 find_package(HttpFramework REQUIRED)
+target_link_libraries(your_target PRIVATE http::framework)
 
-add_executable(my_server main.cpp)
-target_link_libraries(my_server PRIVATE HttpFramework::http_framework)
+# 方式二：作为子目录直接加入
+add_subdirectory(third_party/HttpFramework)
+target_link_libraries(your_target PRIVATE http::framework)
 ```
 
-```cpp
-// main.cpp
-#include "HttpFramework.h"
-int main() {
-    http::App app;
-    app.get("/", [](auto&, auto& res) { res.setHtml("<h1>Hello</h1>"); });
-    app.start(8080);
-}
-```
+WSS 是可选的编译期开关：不启用时，WSS 相关代码不参与编译，也不会引入 OpenSSL 依赖。
 
-编译时指定安装前缀：
+## 功能特性
 
-```bash
-cmake -S . -B build -DCMAKE_PREFIX_PATH=/usr/local
-cmake --build build
-```
+### HTTP 与路由
 
-### 构建选项
+- **HTTP/1.1 解析与响应构造**：请求行/头部/正文字节级解析，含 400（畸形请求）、413（超限）等边界；
+  HEAD 抑制响应体但保留 `Content-Length`；支持静态文件与模板渲染
+- **三类路由匹配**：静态路径（哈希）、`:param` 动态段（分段匹配）、`*` 通配符（正则回退）；
+  按 method 建索引，路径先按段切分再匹配，避免逐条正则
+- **链式中间件**：洋葱模型 + 路径前缀过滤；鉴权、日志、限流等横切逻辑挂在这里
+- **会话管理**：内存与文件两种存储，Cookie 生命周期（含滑动续期）、过期清理
 
-| 选项 | 默认值 | 说明 |
-|------|--------|------|
-| `BUILD_EXAMPLES` | ON | 编译示例程序 |
-| `ENABLE_WSS` | OFF | 启用 WSS (WebSocket + TLS 1.3) 扩展，需要 OpenSSL 3.x |
+### 并发模型
 
-```bash
-# 仅构建库，不编译示例
-cmake -S . -B build -DBUILD_EXAMPLES=OFF
-cmake --build build
-```
+- **多 Reactor**：1 个主 Reactor 只做 accept，按 round-robin 把连接分给 N 个子 Reactor；
+  每连接注册 `EPOLLIN | EPOLLET | EPOLLONESHOT`
+- **独立线程池**：业务逻辑不在 Reactor 线程里跑，交给共享线程池；响应回写经 **eventfd** 唤醒
+  子 Reactor 完成（工作线程不直接操作别人的 epoll）
+- **HTTP 长连接**：支持 keep-alive 与空闲超时回收；管线化请求按序处理
+- **固定块内存池（可选）**：请求/响应缓冲从预分配块里取，块大小与块数可配
 
-## 模块组成
+### WebSocket（可选，`-DENABLE_WSS=ON`）
 
-```
-┌──────────────────────────────────────────────────────────────────┐
-│  应用层    │ 路由系统 │ 中间件系统 │ 会话管理 │ 数据库集成 │ WSS  │
-├──────────────────────────────────────────────────────────────────┤
-│  HTTP层    │ 请求解析 │ 响应构建 │ 协议处理 │ 状态管理            │
-├──────────────────────────────────────────────────────────────────┤
-│  WSS层     │ TLS 1.3 握手 │ WebSocket 帧 │ 0-RTT │ 分片传输       │
-├──────────────────────────────────────────────────────────────────┤
-│  网络层    │ 多Reactor │ epoll ET │ 非阻塞I/O │ eventfd │ 线程池  │
-├──────────────────────────────────────────────────────────────────┤
-│  系统层    │ Socket编程 │ 信号处理 │ 资源管理 │ 优雅关闭           │
-└──────────────────────────────────────────────────────────────────┘
-```
+- **升级握手**：校验 `GET` / `Connection: Upgrade` / `Sec-WebSocket-Version` / 头长度上限
+- **帧解析**：可重入状态机，处理半包、粘包、分片重组、掩码、控制帧、载荷上限与 UTF-8 校验
+- **路由与中间件**：WebSocket 侧有独立的 `WsRouter` 与中间件链
+- **独立事件循环**：WSS 有自己的 epoll 线程处理 TLS 握手与帧 I/O，与 HTTP 共享线程池
 
-### 网络层
-- **多 Reactor 模式**：main Reactor 仅 accept + 轮询分发连接；sub Reactor 各自独立 epoll 处理 read/write；WSS 由于需要额外处理帧解析，使用一个单独的 epoll 线程；HTTP 和 WSS 共享同一个线程池处理业务逻辑；worker 线程通过 eventfd 唤醒 sub Reactor 执行 send，避免跨线程 epoll_ctl 竞态
-- **epoll ET 模式**：边缘触发，减少 epoll_wait 系统调用次数
-- **非阻塞 I/O**：避免线程阻塞，提高并发能力
-- **连接管理**：连接创建、复用、资源回收
+### 文件传输（示例插件）
 
-### HTTP 层
-- **协议解析**：HTTP/1.1 请求行、头部、主体完整解析
-- **响应构建**：HTTP 响应生成和格式化
-- **状态管理**：HTTP 状态码和错误处理
-- **内容类型**：HTML、JSON、文本、文件等多种响应类型
+分片传输协议 + bitmap 断点续传 + 双层 CRC32 校验，实现见示例中的传输中间件。
 
-### 路由层
-- **静态路由**：精确路径匹配
-- **动态路由**：`/users/:id` 参数提取
-- **通配符路由**：`*` 通配符支持
-- **正则匹配**：基于正则表达式的复杂路径匹配
-- **处理器分发**：请求到处理器的映射和分发
+### 能力边界
 
-### 中间件层
-- **链式处理**：多个中间件串联执行，`next()` 控制执行流程
-- **路径过滤**：中间件可指定作用路径前缀（如 `/api`）
-- **上下文传递**：请求上下文在中间件间传递
-- **内置中间件**：日志、会话管理开箱即用
+- 只实现 **HTTP/1.1**（无 HTTP/2、HTTP/3）；不含反向代理、负载均衡、限流
+- **单进程单实例**，无集群与主备；会话默认在内存，多实例间不共享
+- 数据库层是**可选封装**（连接池 + 查询接口），不是 ORM
+- WebSocket 是**编译期开关**，"开了 WSS"与"没开 WSS"是两个二进制，需分别验证
+- 内存池对大响应不友好：请求侧超块回 413，响应侧超块回退 `std::string`
+- 仅 Linux（epoll + eventfd）
 
-### 会话层
-- **会话生命周期**：创建、存储、获取、销毁
-- **Cookie 处理**：会话 Cookie 自动管理
-- **过期清理**：后台线程定期清理过期会话，可配置间隔
-- **线程安全**：互斥锁保护并发访问
-- **可扩展存储**：支持内存存储和数据库持久化
 
-### 数据库层
-- **连接池**：MySQL 连接池管理和优化
-- **健康检查**：连接池健康监控和自动恢复
-- **事务支持**：数据库事务的完整支持
-- **异常处理**：数据库异常的捕获和处理
+## 架构
 
-### 工具层
-- **内存池**：12KB 固定大小内存块，O(1) 分配/释放
-- **线程池**：工作线程创建和任务分发
-- **模板引擎**：HTML 模板加载和 `{{variable}}` 变量替换
-- **信号处理**：SIGINT/SIGTERM 优雅关闭
-
-## 关键组件
-
-### HttpServer — 核心服务器
-
-多 Reactor 架构：main Reactor 线程仅处理 accept，round-robin 将连接分发给 sub Reactor；每个 sub Reactor 独立 epoll 线程处理 read/write；业务逻辑提交到线程池。
-
-```cpp
-class HttpServer {
-    // main Reactor — accept + 分发
-    void mainReactorLoop();
-    void handleAccept();
-    // sub Reactor — read/write（每个线程一个）
-    void subReactorLoop(int index);
-    void handleRead(int fd, int reactorIdx);
-    void handleWrite(int fd, int reactorIdx);
-    // 业务处理（线程池）
-    void enableMemoryPool(bool enable = true);  // 启用内存池
-};
-```
-
-### Router — 路由引擎
-
-基于正则表达式的路径匹配，支持静态路由、动态参数路由、通配符路由。
-
-```cpp
-class Router {
-    void get(const std::string& path, Handler handler);
-    void post(const std::string& path, Handler handler);
-    void put(const std::string& path, Handler handler);
-    void del(const std::string& path, Handler handler);
-    void use(const std::string& path, Middleware middleware);
-    void use(Middleware middleware);             // 全局中间件
-    void setNotFoundHandler(Handler handler);
-    Route* findRoute(const std::string& method, const std::string& path);
-};
-```
-
-### SessionManager — 会话管理器
-
-管理 Session 的完整生命周期，支持自动过期清理和线程安全访问。
-
-```cpp
-class SessionManager {
-    std::shared_ptr<Session> createSession();
-    std::shared_ptr<Session> getSession(const std::string& sessionId);
-    void removeSession(const std::string& sessionId);
-    void cleanupExpiredSessions();
-    void startCleanupThread(std::chrono::seconds interval);
-};
-```
-
-### MemoryPool — 内存池
-
-固定大小内存块（12KB），预分配 5000 个块（共 60MB）。使用栈结构管理空闲块，O(1) 分配/释放，互斥锁保证线程安全。
-
-```cpp
-class MemoryPool {
-    void* allocate();                           // O(1) 获取空闲块
-    void deallocate(void* ptr);                 // O(1) 归还块
-    size_t getAvailableBlocks() const;
-    size_t getTotalBlocks() const;
-};
-```
-
-### WssReactor — WSS 事件循环（ENABLE_WSS）
-
-独立的 epoll 线程，管理 TLS 1.3 非阻塞握手、WebSocket 帧 I/O、心跳超时、eventfd 跨线程唤醒。与 HTTP 的 sub Reactor 并行运行，共享同一 ThreadPool。
-
-```cpp
-class WssReactor {
-    WssReactor(uint16_t port, const std::string& cert, const std::string& key,
-               utils::ThreadPool& pool);
-    bool start();
-    void stop();
-    void setWsRouter(std::shared_ptr<WsRouter> router);
-    void notifyOutbound();        // 从线程池唤醒 IO 线程
-};
-```
-
-### WsRouter — WSS 路由引擎（ENABLE_WSS）
-
-路径匹配 + 中间件链，支持 `:param` 动态路由和 `next()` 中间件链式调用。
-
-```cpp
-class WsRouter {
-    void addHandler(const std::string& path, WsHandler handler);
-    void addMiddleware(WsMiddleware mw);
-    void addMiddleware(const std::string& path, WsMiddleware mw);
-    void setOpenHandler(const std::string& path, WsOpenHandler h);
-    void setCloseHandler(const std::string& path, WsCloseHandler h);
-};
-```
-
-## 工作原理
-
-### 请求处理流程
+### 线程模型：多 Reactor + 线程池
 
 ```
-客户端连接 → main Reactor accept → round-robin 分发给 HTTP sub Reactor
-                                                │ (Upgrade 头)
-                                                ▼
-                                          WSS epoll 线程 (TLS + WebSocket帧)
-     ↓                                             ↓
-sub Reactor epoll 监听                      独立 epoll 处理 I/O
-     ↓                                             ↓
-非阻塞读取 → HTTP 解析                       帧解析/分片重组
-     ↓                                             ↓
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-提交到 共享线程池 (HTTP + WSS 共用)
-     ↓
-业务处理 → 路由匹配 → 中间件链 → 响应构建
-     ↓
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-HTTP: worker 写 eventfd → sub Reactor 被唤醒 → send 响应
-WSS:  worker 写 eventfd → WSS epoll 被唤醒 → send 响应帧
+                      ┌─────────────────────────────────────────┐
+   客户端连接 ────────▶│ 主 Reactor 线程                          │
+                      │   epoll_wait 只做 accept                 │
+                      └────────────────┬────────────────────────┘
+                                       │ round-robin 分发
+                  ┌────────────────────┼────────────────────┐
+                  ▼                    ▼                    ▼
+         ┌────────────────┐   ┌────────────────┐   ┌────────────────┐
+         │ 子 Reactor 0   │   │ 子 Reactor 1   │   │ 子 Reactor N   │
+         │ EPOLLIN|ET     │   │ ...            │   │ ...            │
+         │ |ONESHOT       │   │                │   │                │
+         └───────┬────────┘   └───────┬────────┘   └───────┬────────┘
+                 │  请求收齐后入队      │                    │
+                 └───────────┬─────────┴────────────────────┘
+                             ▼
+                  ┌──────────────────────────┐
+                  │ 共享线程池（默认 4 线程） │  业务处理：中间件链 → 路由 → handler
+                  └───────────┬──────────────┘
+                              │ 写响应：push 到目标连接的 pendingWrites
+                              │ 然后 write(eventfd) 唤醒**属于该连接**的子 Reactor
+                              ▼
+                  子 Reactor 线程：从队列取出 → EPOLL_CTL_MOD 重新注册 → send
 ```
 
-### Reactor 事件循环
+**为什么不让工作线程直接 send / 改 epoll**：子 Reactor 的 epoll 实例是被它自己的线程独占的，
+工作线程去 `EPOLL_CTL_MOD` 相当于两个线程并发操作同一个 epoll；而且连接注册的是 `EPOLLONESHOT`，
+从别的线程改状态会打乱"一次事件一次处理"的语义，可能造成重复投递或丢失事件。
+所以回写动作经 `eventfd` 唤醒后**收敛回子 Reactor 线程**执行。
 
-**主 Reactor** — 仅 accept + round-robin 分发连接给子 Reactor：
+### 请求生命周期
 
-```cpp
-void HttpServer::mainReactorLoop() {
-    while (running_) {
-        int n = epoll_wait(mainEpollFd_, events_, MAX_EVENTS, 1000);
-        for (int i = 0; i < n; ++i) {
-            if (events_[i].data.fd == listenFd_ && (events_[i].events & EPOLLIN))
-                handleAccept();                 // accept  轮询分发到 sub reactor
-        }
-    }
-}
+```mermaid
+sequenceDiagram
+    participant C as 客户端
+    participant SR as 子 Reactor
+    participant TP as 线程池
+    participant H as 业务处理
+    C->>SR: TCP 数据到达（EPOLLIN|EPOLLONESHOT）
+    SR->>SR: recv 进连接缓冲，解析请求；半包则等下一次事件
+    SR->>TP: enqueueDetached(请求任务)
+    Note over SR: ONESHOT 已消费，暂不再监听该连接
+    TP->>H: 中间件链 → 路由匹配 → handler
+    H->>H: 生成响应（序列化）
+    H->>SR: pendingWrites.push(connId) + write(eventfd)
+    SR->>SR: EPOLL_CTL_MOD 重新注册 EPOLLIN|ONESHOT
+    SR->>C: send 响应
+    Note over SR,C: keep-alive 则继续等待下一个请求；空闲超时回收连接
 ```
 
-**子 Reactor** — 多个线程各带独立 epoll + eventfd，处理分配的连接的 I/O：
-（worker 线程通过 eventfd 唤醒 sub Reactor 批量发送响应，避免跨线程 epoll_ctl）
+### WSS 的事件循环（`-DENABLE_WSS=ON`）
 
-```cpp
-void HttpServer::subReactorLoop(int index) {
-    while (running_) {
-        int n = epoll_wait(subReactors_[index].epollFd, events, MAX_EVENTS, 1000);
-        for (int i = 0; i < n; ++i) {
-            int fd = events[i].data.fd;
-            // eventfd 唤醒：批量处理 pending writes
-            if (fd == subReactors_[index].wakeFd) { handleWake(index); continue; }
-            if (events[i].events & (EPOLLERR | EPOLLHUP)) closeConnection(fd, index);
-            else {
-                if (events[i].events & EPOLLIN)  handleRead(fd, index);
-                if (events[i].events & EPOLLOUT) handleWrite(fd, index);
-            }
-        }
-    }
-}
+```
+HTTP 路径:  N 个子 Reactor（各自 epoll）────┐
+                                           ├──▶ 共享线程池 ──▶ 业务（中间件/路由/handler）
+WSS 路径:   1 个 WssReactor（独立 epoll 线程）┘
+             ├─ TLS 1.3 握手、SSL_read / SSL_write
+             ├─ 帧解析：可重入状态机（TLS 记录边界与帧边界不对齐）
+             └─ 只有**解析出完整帧**才把消息交给线程池
 ```
 
-### 工作线程池
+两条路径共用同一个线程池，因此业务层代码（中间件、鉴权、日志）可以复用；
+但 TLS 与帧 I/O 完全在 WssReactor 线程里完成，不占用子 Reactor。
 
-子 Reactor 读取到完整 HTTP 请求后，提交到线程池异步处理，子 Reactor 线程立即返回继续监听 I/O：
+### 连接生命周期
 
-```cpp
-void HttpServer::handleRead(int clientFd, int subReactorIndex) {
-    std::string data = readAllData(clientFd);
-    // 解析 HTTP 请求...
-    auto task = std::make_shared<HttpRequestTask>(
-        clientFd, request, response,
-        [this, subReactorIndex](int fd, auto req, auto res) {
-            processHttpRequest(subReactorIndex, fd, req, res);
-        }
-    );
-    threadPool_->enqueue([task]() { task->execute(); });
-}
-```
+- **归属校验**：每个连接用 `ConnId = (generation << 32) | fd` 标识。fd 会被内核复用，
+  只按 fd 记录会让"旧连接的回调"误伤刚建立的新连接（这正是早期一个真实缺陷的根因）
+- **半关闭处理**：对端 FIN 后先把缓冲读尽再判 EOF；只发 FIN 不一定产生新边沿（ET 下尤其要注意），
+  所以每个 epoll 节拍会主动检查各连接的空闲与 read 状态
+- **优雅停机**：`stop()` 先排空在途业务任务，再释放成员，避免共享线程池上的任务访问已析构对象
 
-### 边缘触发（ET）读处理
+## 核心组件
 
-ET 模式下必须循环读取直到 EAGAIN，否则可能丢失数据：
+| 组件 | 职责与关键设计 |
+|---|---|
+| **HttpServer** | epoll ET + `EPOLLONESHOT` 主循环、accept 分发、连接表（代际校验）、空闲超时扫描、连接数上限 |
+| **ConnectionHandler** | 单连接读写状态机：半包、管线化、EOF、`Content-Length`/chunked 边界 |
+| **HttpRequest / HttpResponse** | 解析与构造：URL 解码、头名大小写归一化、`HEAD` 抑制响应体、序列化用 reserve + 直接拼接 |
+| **Router** | 静态哈希 + `:param` 分段匹配 + `*` 正则回退；method 索引；运行期注册走"拷贝-换入"快照 |
+| **Middleware** | 洋葱模型 + 路径前缀过滤；入口处一次性算好匹配列表，避免每请求整表重算 |
+| **SessionManager** | 内存 / 文件两种存储、Cookie 生命周期（滑动续期）、过期清理、文件存储 ID 白名单 + 原子写 |
+| **MemoryPool** | 固定块（默认 12 KB × 5000）、惰性初始化、分配计数可观测、可运行期开关（默认关闭） |
+| **ThreadPool** | 任务队列 + 状态统计；`enqueueDetached` 提供无 `packaged_task`/`future` 的轻量路径 |
+| **WssReactor** | TLS 1.3 握手、帧解析状态机、活跃连接集合、出站队列（`SSL_write` 移出锁） |
+| **WsRouter** | WebSocket 侧路由，按升级路径缓存解析结果 |
 
-```cpp
-void handleRead(int fd) {
-    char buffer[8192];
-    while (true) {
-        ssize_t n = read(fd, buffer, sizeof(buffer));
-        if (n > 0) {
-            // 追加到请求缓冲区
-        } else if (n == 0 || (n < 0 && errno != EAGAIN)) {
-            closeConnection(fd);                // 连接关闭或错误
-            break;
-        } else {
-            break;                              // EAGAIN — 数据读完
-        }
-    }
-}
-```
 
-### 内存池分配
+## 关键设计与取舍
 
-```cpp
-void* MemoryPool::allocate() {
-    std::lock_guard<std::mutex> lock(mutex_);
-    if (availableBlocks_.empty()) return nullptr;  // 池耗尽
-    void* block = availableBlocks_.top();
-    availableBlocks_.pop();
-    return block;
-}
-```
+**回写为什么走 eventfd。** 子 Reactor 的 epoll 实例被它自己的线程独占，工作线程直接
+`EPOLL_CTL_MOD` 等于两个线程并发操作同一个 epoll；再加上连接注册的是 `EPOLLONESHOT`，
+跨线程改状态会打乱"一次事件一次处理"的语义。用 `eventfd` 把回写收敛回 Reactor 线程，
+代价是每次响应多一次跨线程唤醒（实测这个开销远小于并发操作 epoll 的风险）。
 
-### 会话创建与过期清理
+**为什么做固定块内存池，以及为什么默认关闭。** 动机是"高频分配"——早期是短连接形态，
+每请求新建/销毁缓冲。但长连接改造之后，500 并发 30 秒里池的 `allocate/deallocate`
+只增加 1002 次（每千请求约 1 次），复用度已经由连接本身提供；在 glibc 的 per-thread
+`tcache` 面前，这把带锁的池不再有优势。三轮交替复测的方向分别是 −3.5% / +6.1% / +1.1%，
+**只能说"无可观测收益"**，所以默认关闭（另外它会预分配约 20 MB）。
 
-```cpp
-std::shared_ptr<Session> SessionManager::createSession() {
-    std::string id = generateUniqueId();
-    auto session = std::make_shared<Session>(id);
-    std::lock_guard<std::mutex> lock(sessionsMutex_);
-    sessions_[id] = session;
-    return session;
-}
+**0-RTT 的取舍。** TLS 1.3 的 0-RTT 能省一个 RTT，但有重放风险。OpenSSL 内置的
+anti-replay 要求服务端缓存票据，多实例部署下不可用，所以本项目显式关掉它，改在应用层
+用请求头里的 `X-Nonce` + 带 TTL 的 seen 表判重。**这意味着安全责任从库移到了应用**：
+nonce 校验必须是必选项，且默认配置不开 0-RTT。
 
-void SessionManager::cleanupExpiredSessions() {
-    std::lock_guard<std::mutex> lock(sessionsMutex_);
-    for (auto it = sessions_.begin(); it != sessions_.end(); ) {
-        if (it->second->isExpired()) it = sessions_.erase(it);
-        else ++it;
-    }
-}
-```
+**TLS 记录边界不等于 WebSocket 帧边界。** 一次 `SSL_read` 可能只返回半个帧、也可能一次
+带回多个帧；而升级请求和头几批数据还可能挤在同一个 TLS 记录里。所以解析器必须是**可重入
+状态机**：任何位置字节不够就退出并保留未消费数据，下次进来接着解；一次 feed 允许解出多个帧。
+
+**响应序列化。** 早期实现逐个字段拼接、反复扩容；现在先 `reserve` 再直接拼接，
+并把 `Date` 头按秒缓存，避免每个响应都做一次时间格式化。
+
+**路径参数怎么塞回请求对象。** 路由匹配出的 `:param` 需要交给 handler。当前实现由
+`RouterHandler` 用 `const_cast` 把参数写回 `HttpRequest`——它不在"未定义行为"的意义上有问题
+（对象本身不是 const），但确实是个不漂亮的接口，记在待办里。
 
 ## 项目难点
 
-### 技术难点
+### ① TLS 记录边界与 WebSocket 帧边界不对齐
 
-#### 1. 高并发设计
+**难在哪**：WebSocket 帧长在 TLS 记录的载荷里，而 TLS 记录长度与帧长度毫无关系。
+一次 `SSL_read` 的返回值可能是：半个帧、一个帧、多个帧、甚至"升级请求 + 前几帧"。
+天真写法（"读到数据就当一帧解"）在真机上会立刻错位。
 
-**如何设计高效的并发模型以支持数千并发连接？**
+**怎么做的**：可重入状态机。解析器维护"已收字节 / 当前帧状态"，任何位置字节不够就
+**保留未消费数据并退出**，下次 `feed` 接着解；一次调用允许连续解出多个帧。
+分片、控制帧、RSV 位、掩码位、载荷上限、UTF-8 合法性都在解析器里校验，非法帧直接断连
+（关闭码区分：分片超限 1009、非法 UTF-8 1007、非最小编码 1002）。
 
-采用多 Reactor 模型：main Reactor 线程仅 accept + round-robin 分发连接。sub Reactor 线程（默认 `hardware_concurrency` 个）各带独立 epoll，分别处理自己那组连接的 read/write，I/O 负载天然分散。业务逻辑提交到线程池异步执行，避免阻塞 sub Reactor。ET 模式减少 epoll_wait 调用频率，非阻塞 I/O 避免线程空等。
+**验证**：`tests/test_wss_hardening.cpp` 覆盖升级校验、`onClose` 时序、分片上限、
+出站顺序、半开连接回收、Close 帧送达；`test_wss_router.cpp` 覆盖计划缓存生命周期。
 
-```cpp
-// epoll ET 模式配置
-int epollFd_ = epoll_create1(EPOLL_CLOEXEC);
-struct epoll_event event;
-event.events = EPOLLIN | EPOLLET;               // 边缘触发
-event.data.fd = clientFd;
-epoll_ctl(epollFd_, EPOLL_CTL_ADD, clientFd, &event);
-```
+### ② 跨线程回写：工作线程不能碰别人的 epoll
 
-#### 2. 内存管理
+**难在哪**：连接注册的是 `EPOLLONESHOT`，事件被消费后必须由**同一个** Reactor 线程重新注册。
+第一版让工作线程直接对子 Reactor 的 epoll 做 `EPOLL_CTL_MOD`，问题有两个：
+① 两个线程并发操作同一个 epoll 实例；② oneshot 状态下 MOD 会重置状态，可能重复投递或丢事件。
 
-**如何避免内存泄漏和频繁的内存分配/释放？**
+**怎么做的**：每个子 Reactor 一个 `eventfd` + 一个 `pendingWrites` 队列。工作线程只做两件事：
+把连接的 `ConnId` push 进队列、`write(eventfd)`。send 与重新注册全部收敛回子 Reactor 线程。
+**顺带**：正因为回写带了 `ConnId`，这里必须做归属校验（见 ⑤），否则队列里躺着的旧连接
+回调会打到已经复用同一 fd 的新连接上。
 
-预分配 12KB 固定大小内存块（5000 块，共 60MB），栈结构管理空闲块，O(1) 分配/释放。RAII + 智能指针管理对象生命周期，零拷贝减少不必要的数据复制。
+### ③ 0-RTT 重放防护：把责任从库移到应用
 
-```cpp
-class MemoryPool {
-    std::stack<void*> availableBlocks_;          // 空闲块栈，O(1) 操作
-    std::mutex mutex_;                           // 线程安全
-    static constexpr size_t BLOCK_SIZE = 12288;  // 12KB
-};
-```
+**难在哪**：0-RTT 的吸引力是省一个 RTT（对短连接场景可观），但允许重放。OpenSSL 的
+anti-replay 依赖服务端缓存 session ticket——单机可用，**多实例部署直接失效**。
 
-#### 3. 线程安全
+**取舍**：显式关闭 OpenSSL 的 anti-replay，改在应用层判重（`X-Nonce` + TTL seen 表），
+并**默认不开 0-RTT**。这个取舍是明确的：安全责任从库移到了应用，所以 nonce 校验必须
+是必选项而不是可选装饰。
 
-**多线程环境下的数据同步和竞态条件处理？**
+**如实交代的边界**：目前只有"H9：设了环境变量也不影响非 0-RTT 连接升级"这一条用例，
+**缺少 early data + `X-Nonce` 判重的端到端验证**（记在 TODO 的 I5）。
 
-关键数据结构使用互斥锁保护，原子变量（`std::atomic`）减少锁竞争，细粒度锁设计避免大范围加锁。SessionManager、MemoryPool、DbConnectionPool 各自持有独立锁。
+### ④ 内存池带来的两个问题
 
-```cpp
-class SessionManager {
-    mutable std::mutex sessionsMutex_;
-    std::unordered_map<std::string, std::shared_ptr<Session>> sessions_;
-};
-```
+**问题一：12 KB 单块导致响应被静默截断。** `HttpContext::setResponseData` 在池模式下
+调 `responseBuffer_->write(data)` 却**忽略返回值**，而单块只有 12 KB。现象很隐蔽：
+响应头写着 `Content-Length: 20000`，客户端实收 12117–12289 字节，keep-alive 下后续请求还会错位。
+修法是响应侧超限回退 `std::string`、请求侧比对实际写入字节数并回 413（带 `{"limit":...}`）。
 
-#### 4. 性能优化
+**问题二：它其实没有收益。** 长连接改造之后池的调用频率降到每千请求约 1 次
+（500 并发 30 秒累计 1,008,350 请求，`allocate/deallocate` 只增加 1,002 次），
+三轮交替复测方向翻转。**结论是默认关闭**——理由是无收益 + 多占约 20 MB，而不是"性能更差"。
 
-**如何减少系统调用和内存拷贝，提高整体性能？**
+### ⑤ 连接生命周期与 fd 归属：陈旧回调误杀新连接
 
-- epoll ET 模式减少 epoll_wait 调用次数
-- 内存池消除频繁 malloc/free 的开销和碎片
-- ET 模式循环读取，一次事件通知处理全部数据
-- 正则表达式编译缓存，避免重复编译路径模式
+**难在哪**：fd 会被内核复用。只按 fd 记录连接状态时，"上一个连接的回调"可能作用在
+**刚复用同一 fd 的新连接**上。现象是服务端日志里出现**两条相同 fd 的关闭记录**
+（分别来自不同的子 Reactor），而新连接复用几次之后就被单方面断开——客户端看到的是"莫名 RST"。
 
-#### 5. 错误处理与资源管理
+**怎么做的**：连接标识改为 `ConnId = (generation << 32) | fd`，所有回写与关闭都带归属校验，
+代际不匹配就丢弃。复测：记录恒为每 Reactor 各一条、连接复用 8–17 次全部正常。
 
-**如何设计完善的异常处理和恢复机制？**
+**为什么值得讲**：这类缺陷在压测里表现为"偶发连接断开"，很容易被归因成"客户端或网络问题"
+而放过去；把它定位到"fd 复用 + 缺少代际"需要先怀疑自己的状态模型。
 
-RAII + 智能指针保证异常安全——无论正常还是异常路径，资源自动释放。数据库连接池初始化失败时自动降级，不影响服务器启动。析构函数中捕获异常，防止资源泄漏。
 
-```cpp
-class HttpServer {
-    ~HttpServer() {
-        try { stop(); }                         // 优雅关闭
-        catch (...) { /* 不抛出 */ }
-    }
-};
-```
+## 实测性能
 
-### 工程难点
+> 环境：2 vCPU / 1968 MB 的 VPS（**压测端与被测服务同机 loopback**），服务线程池 4，`wrk 4.2.0`（`-t4`）
+> 测量脚本：`scripts/bench_http.sh` —— 启动服务后会**校验监听者身份**，结果落盘 `results/http_bench_<时间戳>.txt`
+> 下表是 2026-09-20 用该脚本重跑的一批。与更早批次相比，每请求 CPU 与短连接吞吐有差异（机器状态不同），两批数据都保留在 `results/`
 
-#### 模块解耦
+### 并发梯度（长连接）
 
-通过清晰接口抽象隔离模块：Router 只关心路径匹配和处理器分发，不感知 HTTP 解析细节；Middleware 通过 `next()` 函数控制链式流转，不依赖具体业务逻辑；Session 和 DB 通过 `enable*()` 按需启用，不强制绑定。
+| 并发 | 吞吐 (req/s) | p50 | p99 | socket 错误 |
+|---|---|---|---|---|
+| 100 | 34,042 | 2.74 ms | 6.43 ms | 0 |
+| 500 | 34,530 | 13.91 ms | 26.53 ms | 0 |
+| 1000 | 33,032 | 29.45 ms | 51.45 ms | 0 |
+| 2000 | 31,629 | 61.53 ms | 99.44 ms | 0 |
+| 5000 | **30,917** | 157.43 ms | 233.57 ms | 0 |
 
-#### API 设计
+**读法**：多次测量落在 **30k–38k** 区间（±6%），这一批在 31k–35k。**5,000 并发下仍保持 3 万 req/s 且零 socket 错误**。
+延迟随并发近似线性增长（符合 `延迟 ≈ 并发 ÷ 吞吐` 的排队关系），所以"低延迟"与"高并发"必须**同时标注档位**才有意义。
 
-底层 API 更加灵活，App 类更加简洁，满足不同场景需求。链式调用减少中间变量，默认参数覆盖常见配置，同时保留 `router()` / `sessionManager()` / `dbPool()` 访问器直接操作底层对象。
+### 每请求 CPU
 
-## 项目结构
+| 指标 | 数值 |
+|---|---|
+| 每请求 CPU（c=1000，`/proc/<pid>/stat` 差分 ÷ 请求数） | **37.1 µs**（3478 jiffies / 936,791 请求） |
 
-```
-HttpFramework/
-├── CMakeLists.txt                      # 主构建配置
-├── cmake/
-│   └── HttpFrameworkConfig.cmake.in    # find_package 包配置模板
-├── include/
-│   ├── HttpFramework.h                 # App 类
-│   ├── HttpFramework/wss/              # WSS 扩展：WssTypes / WebSocketCodec / WssConnection / WssReactor / WsRouter / OpenSslHelpers
-│   ├── http/                           # HttpServer / HttpRequest / HttpResponse / HttpContext
-│   ├── router/                         # Router / RouterHandler
-│   ├── session/                        # Session / SessionManager / SessionStorage
-│   ├── middleware/                     # SessionMiddleware
-│   └── utils/                          # MemoryPool / ThreadPool / TemplateLoader / db
-├── src/                                # 源文件
-│   └── wss/                            # WSS 模块实现
-├── templates/                          # HTML 模板（{{variable}} 变量替换）
-├── examples/
-│   ├── hello_world.cpp                 # 最简示例
-│   ├── full_demo.cpp                   # 全功能演示（路由/会话/DB/模板/统计）
-│   ├── bench_server.cpp                # 性能基准测试服务器
-│   └── wss_echo.cpp                    # WSS 回显演示（需 ENABLE_WSS=ON）
-├── tests/                              # 单元测试
-├── scripts/                            # 基准测试脚本 (HTTP/WSS/全量/报告)
-├── templates/                          # HTML 模板（{{variable}} 变量替换）
-└── init.sql                            # 数据库初始化脚本
-```
+更早批次用同一方法测到 32.3 µs —— 差异来自机器状态而非代码改动，两批都留在 `results/` 里。
 
-## 功能验证
+### 路由与中间件的重复匹配（优化前后对照）
 
-### 单元测试
+| 场景 | 优化前 | 优化后 |
+|---|---|---|
+| 50 层中间件（c=1000） | 1,810 req/s | **31,134 req/s（×17.2）** |
+| 500 条路由、命中**末条** | 11,069 req/s | **40,115 req/s（×3.6）** |
+| 500 条路由、命中靠前 | —— | ×1.11 |
 
-项目包含完整的单元测试套件（下表的用例数由 ctest 实跑汇总：默认配置 `ctest -LE requires-db`
-为 **12/12**，`-DENABLE_WSS=ON` 为 **15/15**，均 0 失败）。"跳过"是独立的第三种结果，
-不计入通过——需要外部依赖（数据库、证书）的用例在依赖缺失时明确 SKIP 并打印原因：
+根因是每个请求都把中间件链与路由表**整表重算**（`findMiddlewares` 走 O(M) 正则、路由逐条匹配）。
+改动是入口处一次性算好中间件列表，路由改为 method 索引 + 静态哈希 + 分段匹配。
+"命中靠前只有 ×1.11"说明收益来自"**找得对不对**"，而不是"找得快"。
+
+### 内存池：无可观测收益
+
+交替执行（默认 ↔ `--mempool`），各 30 秒：
+
+| 轮次 | 无池 (req/s) | 开池 (req/s) |
+|---|---|---|
+| 1 | 35,914 | 34,885 |
+| 2 | 31,444 | 32,466 |
+| 3 | 31,442 | 33,915 |
+
+**三轮方向不一致**（第 1 轮无池快、第 2/3 轮开池快），差异全在噪声内 ⇒ 只能表述为**无可观测收益**，不给百分比。
+原因是池的调用频率太低：500 并发 30 秒累计 1,008,350 请求，`allocate/deallocate` 只增加 **1,002 次**
+（每千请求约 1 次，可用 `curl /stats` 读 `mempool.alloc_calls` 复现）。**因此默认关闭**，
+理由是无收益 + 多占约 20 MB。
+
+> 文档里曾出现"内存池提升 55%"：那组数字来自更早的入库数据（修复前的实现 + "先跑完 A 再跑 B"的测法），
+> 在当前实现上用交替复测**复现不出来**，已从文档移除。
+
+### 短连接
+
+三次测量的前两次是 10,590 / 10,895 req/s。短连接吞吐受客户端端口与 TIME_WAIT 资源影响、
+波动可达 30%+，**只作区间参考（约 1.0–1.1 万 req/s）**，不参与任何结论。
+
+## 测试与基准
+
+### 单元与集成测试
 
 ```bash
-# 编译并运行所有测试
-cmake -S . -B build && cmake --build build -j 2
-for t in build/tests/test_*; do $t; done
+# 默认配置（仅 HTTP）
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release && cmake --build build -j
+cd build && ctest --output-on-failure          # 12/12
 
-# 或使用 CMake 自定义目标
-cmake --build build --target run_tests
+# 启用 WSS 扩展
+cmake -S . -B build-wss -DCMAKE_BUILD_TYPE=Release -DENABLE_WSS=ON
+cmake --build build-wss -j && cd build-wss && ctest --output-on-failure   # 15/15
 ```
 
-| 测试文件 | 模块 | 用例数 |
-|----------|------|--------|
+| 测试文件 | 覆盖内容 | 用例数 |
+|---|---|---|
 | `test_infra_threadpool` | 线程池：入队/批量/队列/关闭/状态 | 9 |
 | `test_infra_mempool` | 内存池：分配/FIFO/耗尽/RAII/统计 | 11 |
-| `test_infra_logger` | 日志系统：级别过滤/模块过滤/输出 | 6 |
-| `test_http_route` | 路由匹配：静态/动态/通配符/:param 形态等价性/404/方法 | 11 |
+| `test_infra_logger` | 日志：级别过滤/模块过滤/输出 | 6 |
+| `test_http_route` | 路由：静态/动态/通配符/`:param` 形态等价性/404/方法 | 11 |
 | `test_http_middleware` | 中间件链：洋葱模型/路径过滤/鉴权 | 6 |
-| `test_http_session` | 会话管理：CRUD/过期/清理/Cookie | 13 |
+| `test_http_session` | 会话：CRUD/过期/清理/Cookie | 13 |
 | `test_http_response` | 响应构建：HTML/JSON/File/Binary/重定向 | 12 |
-| `test_http_template` | 模板引擎：加载/变量替换/fallback | 5 |
-| `test_http_db` | 数据库连接池：初始化/获取/查询/计数/TCP 探测（无数据库时 1 通过 + 5 跳过，退出码 0） | 6 |
-| `test_http_keepalive` | 长连接：复用、管线化、空闲回收 | 5 |
-| `test_edge_input` | 异常输入：Header过大/路径穿越/畸形请求 | 7 |
-| `test_edge_cert` | 证书异常：不匹配/缺失/空路径 (需 WSS) | 5 |
-| `test_edge_stress` | 并发压力：1000请求/统计/重启/fd泄露 | 4 |
-| `test_http_hardening` | 加固回归：信号/管线化/框架头/慢速滴灌/畸形请求 (H1-H15) | 20 |
-| `test_wss_hardening` | WSS 回归：升级校验/onClose/分片上限/出站顺序/半开连接回收/Close 帧送达 (需 WSS) | 11 |
-| `test_wss_router` | WsRouter 计划缓存生命周期与失效 (需 WSS) | 3 |
+| `test_http_template` | 模板：加载/变量替换/fallback | 5 |
+| `test_http_db` | 数据库连接池：初始化/获取/查询/计数/TCP 探测（无库时 1 通过 + 5 跳过） | 6 |
+| `test_edge_input` | 异常输入：Header 过大/路径穿越/畸形请求 | 7 |
+| `test_edge_stress` | 并发压力：1000 请求/统计/重启/fd 泄露 | 4 |
+| `test_http_hardening` | 加固回归：信号/管线化/框架头/慢速滴灌/畸形请求 | 20 |
+| `test_http_keepalive` | 长连接：复用/管线化/空闲回收 | 5 |
+| `test_wss_hardening` | WSS 回归：升级校验/`onClose`/分片上限/出站顺序/半开连接/Close 帧（需 WSS） | 11 |
+| `test_wss_router` | WsRouter 计划缓存生命周期与失效（需 WSS） | 3 |
 
-### 性能基准测试
+**"跳过"是独立的第三种结果**：需要外部依赖（数据库、证书）的用例在依赖缺失时明确 SKIP 并打印原因，
+**不计入通过**——例如无数据库时 `test_http_db` 是"1 通过 + 5 跳过"、退出码 0。
+（ctest 这一层目前还区分不了跳过，记在 TODO 里。）
 
-#### 实测结果（HTTP 长连接）
+**测试设计**：全部使用真实文件系统 + 真实 loopback socket + 真实 OpenSSL，**不用 mock**。
+好处是能覆盖真实的失败路径：`EADDRINUSE` 端口冲突、缺失文件回 404、模板缺失 fallback、
+session 过期与清理、中间件鉴权短路 401、`shutdown` 后 `enqueue` 抛异常、内存池耗尽返回 `nullptr`。
 
-> 环境：本机 **2 vCPU / 1968 MB**（**压测端与被测服务同机环回**），Linux 6.8.0，`wrk 4.2.0`（`-t4`，压测线程数与核数相当），`bench_server --threads 4`
-> 同机环回意味着这些数字**不含真实网络**，衡量的是框架自身的分配与调度开销，不能外推到生产环境。
-> 测量纪律：每组测量前用 `ss -ltnp` 校验监听者 PID 等于刚启动的进程（否则可能打到残留进程上）；A/B 对照必须**交替执行**且至少 3 轮。
-
-| 指标 | 数值 | 条件 |
-|------|------|------|
-| 长连接吞吐 | **30k–38k req/s**（多次测量 ±6%） | 100–5000 并发 / 30s / 服务线程池 4 |
-| 延迟分布 | p50 **2.49 ms** / p99 6.07 ms | 100 并发 / 30s |
-| 每请求 CPU 时间 | **32.3 µs** | 1000 并发 / 30s（`/proc/<pid>/stat` 差分 ÷ 请求数） |
-| 短连接吞吐 | **约 1.2–1.6 万 req/s** | 1000 并发（**波动 38%**，受客户端端口与 TIME_WAIT 资源影响，只能给区间） |
-| 常驻内存 | 4.2 MB 空闲 / 11.4 MB 压测后 / 27.3 MB 开内存池 | 500 并发（VmRSS） |
-| 错误率 | 0 | 各档均为 0 |
-
-**并发梯度**（`wrk -t4 -d30s --latency`，服务线程池 4，同一构建）：
-
-| 并发 | 吞吐 (req/s) | p50 | p99 | 错误 |
-|------|-------------|-----|-----|------|
-| 100 | **37,553** | 2.49 ms | 6.07 ms | 0 |
-| 500 | 33,946 | 14.18 ms | 27.15 ms | 0 |
-| 1000 | 33,450 | 28.56 ms | 54.31 ms | 0 |
-| 2000 | 30,404 | 64.05 ms | 103.60 ms | 0 |
-| 5000 | **34,048** | 142.11 ms | 219.39 ms | 0 |
-
-**读法**：吞吐在 100–5000 并发之间维持在 30k–38k 区间内（±6% 属于测量波动），**5,000 并发下仍保持
-34k 且零错误**，说明连接管理在高压下稳定。延迟随并发近似线性增长（符合 `延迟 ≈ 并发 ÷ 吞吐`
-的排队关系），因此**「低延迟」与「高并发」必须同时标注档位**才有意义。
-
-#### 内存池：无可观测收益（默认关闭的理由是"无收益 + 多占约 20 MB"）
-
-长连接 + 500 并发压测期间累计 **1,008,350** 请求，内存池的 `allocate/deallocate` 只增加 **1,002 次**
-（500 个连接各分配 2 个缓冲后完全复用），即**每千请求约 1 次分配**（可用 `curl /stats` 读
-`mempool.alloc_calls` 复现）。调用频率低到这个量级，本身就不可能带来可观测收益——因此
-去锁、thread-local 化这类进一步优化不值得投入；在 glibc `tcache`（per-thread 无锁缓存）面前，
-这个池没有优势。
-
-**为什么这里不再写「内存池提升 55%」**：+55.4%（main 分支 37,734.96 → 58,652.58 req/s）来自
-2026-05-30 入库的历史数据，反映的是**修复前的实现与那套测法**（当时 `PooledBuffer::clear()`
-每次清零 12 KB 的 `memset` 等）。在当前实现上用同机同命令、交替执行、带监听者校验做对照复测，
-池开关的差异落在噪声内——三轮方向分别是 **−3.5% / +6.1% / +1.1%**，三次方向都翻转，
-因此只能表述为"无可观测收益"，**不给百分比**。
-
-#### 路由与中间件（重复匹配修复）
-
-| 场景 | 修复前 | 修复后 |
-|------|--------|--------|
-| 50 层中间件（c=1000） | 1,810 req/s | **31,134 req/s（×17.2）** |
-| 路由 500 条命中**末条** | 11,069 req/s | **40,115 req/s（×3.6）** |
-| 路由命中靠前 | —— | ×1.11 |
-
-根因是每个请求都把中间件链与路由表**整表重算**（`findMiddlewares` 走 O(M) 正则、路由逐条匹配）；
-改动是入口处先算好中间件列表，路由改为 method 索引 + 静态哈希 + 分段匹配。两组数字都做过
-独立复现；"命中靠前仅 ×1.11"说明收益来自"找得对不对"，而不是"找得快"。
-
-#### 已知未复测项
-
-服务线程池档位：早期单次测量曾给出"线程池越小越快"（1 线程 52,789 vs 4 线程 35,085 req/s），
-但**未做交替复测**，在 ±6% 的测量波动纪律下不足以作为结论，故不列入上表。
-
-提供参数化基准服务器和自动化测定脚本，可对 `main`（纯 HTTP）和 `feature/WebSocket`（HTTP + WSS）分支分别测试：
+### 性能基准
 
 ```bash
-# 安装依赖
-sudo apt install wrk
-
-# 启动基准服务器（参数化配置）
-./build/examples/bench_server --port 8080 --threads 4 --mempool --routes 100
-
-# 运行 HTTP 全指标测定 (~3 分钟)
-bash scripts/run_http_bench.sh main results/main
-
-# 运行 WSS 全指标测定 (需先启动带 WSS 的服务器)
-./build/examples/bench_server --port 18080 --wss-port 18990 \
-    --cert /tmp/bench_cert.pem --key /tmp/bench_key.pem --threads 4 &
-bash scripts/run_wss_bench.sh feature/WebSocket results/wss
-
-# 双分支全量测定 (自动切换分支、编译、测试)
-bash scripts/bench_all.sh
-
-# 生成对比报告
-bash scripts/generate_report.sh
+bash scripts/bench_http.sh          # 全量：并发梯度 + 每请求 CPU + 内存池交替 + 短连接（约 8 分钟）
+bash scripts/bench_http.sh quick    # 快速回归：100/1000 两档 + 内存池单轮（约 2 分钟）
 ```
 
-> **注意**：使用 `--template` 选项时需在 build 目录下运行（`cd build && ./examples/bench_server ...`），
-> 确保 `templates/` 目录可访问。WSS 测试需先生成自签名证书。
->
-> 脚本行为（2026-09-18 起）：结果目录由分支名显式映射（`main` → `results/main`、
-> `feature/WebSocket` → `results/wss`）；每个结果文件头会写入环境锚定信息
-> （CPU 型号与核数、gcc 版本、`git rev-parse HEAD`、wrk 版本、CPU governor），
-> 便于日后确认数据对应的代码版本与机器；缺少工具（如未安装 `wrk`/`wscat`）时
-> 相关项写"跳过 + 原因 + 修复"并按退出码 3 结束，不会产出空数据或 0 值。
-> 公共函数在 `scripts/bench_env.sh`（由各脚本 source，不需要单独执行）。
-> `wss_bench_client` 的用法为
-> `wss_bench_client <host> <port> <path> [count] [msg_size] [rounds] [warmup]`，
-> 默认 `count=1000` 并先跑一轮预热（预热不计入统计）。
+脚本启动服务后会校验监听者身份，不通过则把整批标记作废；结果统一写入 `results/`。
 
-基准服务器 CLI 选项：
+## 构建选项与配置
 
-| 选项 | 默认值 | 说明 |
-|------|--------|------|
-| `--port PORT` | 8080 | HTTP 端口 |
-| `--threads N` | 4 | 工作线程数 |
-| `--mempool` | off | 启用 12KB 固定块内存池 |
-| `--routes N` | 0 | 额外注册 N 条路由 (测路由扩展性, 最大 5000) |
-| `--middleware N` | 0 | 额外全局中间件层数 (最大 50) |
-| `--session` | off | 启用 Session 中间件 |
-| `--template` | off | 启用 Template 端点 |
-| `--wss-port PORT` | 0 | WSS 端口 (0=禁用, 需 `ENABLE_WSS=ON`) |
-| `--cert FILE` | /tmp/bench_cert.pem | TLS 证书路径 |
-| `--key FILE` | /tmp/bench_key.pem | TLS 私钥路径 |
+| 选项 | 默认 | 说明 |
+|---|---|---|
+| `CMAKE_BUILD_TYPE` | 未指定 | 建议 `Release`（不指定时不做优化，性能数据不可比） |
+| `ENABLE_WSS` | `OFF` | 启用 WebSocket + TLS 1.3 扩展（需要 OpenSSL 3.x） |
+| `BUILD_EXAMPLES` | `ON` | 编译 `examples/` 下的示例与 `bench_server` |
+| `ENABLE_STRICT_WARNINGS` | `OFF` | 把部分警告提升为错误（`-Werror=return-type` / `-Werror=unused-result`） |
+| `SANITIZE` | 空 | 传 `address` / `thread` 启用对应 sanitizer（需要手工跑，未进 CI） |
 
-测定覆盖：
-
-| 指标 ID | 内容 | 工具 |
-|---------|------|------|
-| A1-A5 | HTTP 吞吐量/延迟/并发/内存 | `wrk` |
-| B1-B3 | 线程扩展性/内存池收益/路由退化 | `wrk` |
-| C1-C2 | 中间件开销/会话开销 | `wrk` |
-| D1-D5 | WSS 消息吞吐/握手速率/并发/文件传输 | `wscat` + `openssl` |
-
-启动 `full_demo` 后可用端点：
-
-| 端点 | 说明 |
-|------|------|
-| `http://localhost:8080/` | 首页（模板渲染） |
-| `http://localhost:8080/api/status` | 服务器状态 |
-| `http://localhost:8080/api/stats` | 性能统计 |
-| `http://localhost:8080/api/time` | 服务端时间 |
-| `http://localhost:8080/api/echo` | Echo（POST） |
-| `http://localhost:8080/session/info` | 会话信息 |
-| `http://localhost:8080/session/stats` | 会话统计 |
-| `http://localhost:8080/db/test` | 数据库连接测试 |
-| `http://localhost:8080/db/users` | 用户列表 |
-| `http://localhost:8080/db/add-user` | 添加用户表单 |
-
-```bash
-# 压力测试
-wrk -t4 -c100 -d30s http://localhost:8080/
-
-# API 测试
-curl http://localhost:8080/api/status
-```
+运行时配置集中在 `http::App` 与 `HttpServer`：监听端口与连接数上限、空闲超时、服务线程池大小、
+内存池开关与块大小/块数、静态文件根目录、模板目录、会话存储方式与过期时间。
 
 ## API 参考
+
+> 下面是公开接口速查；**完整签名与默认值以 `include/` 下的头文件为准**，示例见 `examples/`。
 
 ### App
 
@@ -1002,15 +549,3 @@ public:
     void setContentType(const std::string& contentType);
 };
 ```
-
-## 故障排除
-
-**编译错误**：确保依赖完整  `apt install build-essential cmake libboost-all-dev libmysqlcppconn-dev libssl-dev`，清理重编  `rm -rf build && cmake -S . -B build && cmake --build build`
-
-**WSS 编译失败**：确认 OpenSSL 已安装  `dpkg -l libssl-dev`，使用 `-DENABLE_WSS=OFF` 可跳过 WSS 模块
-
-**数据库连接失败**：MySQL 不可用时 `enableDatabase()` 自动降级，检查 `sudo systemctl status mysql`，或直接不调用 `enableDatabase()`
-
-**端口被占用**：`netstat -tlnp | grep :8080` 查看占用进程
-
-**禁止源码内构建**：项目强制 out-of-source build。`cmake .` 会直接 FATAL_ERROR，防止 `make clean` 误删源文件。始终使用 `cmake -S . -B build`
