@@ -357,6 +357,21 @@ anti-replay 依赖服务端缓存 session ticket——单机可用，**多实例
 理由是无收益 + 多占约 20 MB。
 
 
+### WebSocket over TLS 1.3（`-DENABLE_WSS=ON`）
+
+用 `examples/wss_echo`（回声服务）与 `examples/wss_bench_client`（逐条发送并等回显、记录往返延迟）测得：
+
+| 档位 | 吞吐 |
+|---|---|
+| 消息往返 256 B | 8,871 msg/s |
+| 消息往返 1 KB | 8,919 msg/s |
+| 消息往返 16 KB | 4,170 msg/s |
+| TLS 握手 | 19.0 次/秒（50 成功 / 0 失败） |
+| 并发连接 | 100/100 建立成功（判据：升级响应首行匹配 `^HTTP/1.[01] 101`） |
+
+16 KB 档低于小包是预期的（超过 MSS 会被拆成十几段），但仍保持 4 千 msg/s 量级。
+原始输出见 `results/wss-fixed-20260920/`。
+
 ### 短连接
 
 三次测量的前两次是 10,590 / 10,895 req/s。短连接吞吐受客户端端口与 TIME_WAIT 资源影响、
