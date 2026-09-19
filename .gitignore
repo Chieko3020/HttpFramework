@@ -108,3 +108,5 @@ config.ini
 *.zip
 *.app
 TODO
+build-wss/
+build-*/
