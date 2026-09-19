@@ -29,6 +29,7 @@
 
 #include <sys/socket.h>
 #include <netinet/in.h>
+#include <netinet/tcp.h>
 #include <netdb.h>
 #include <unistd.h>
 
@@ -39,6 +40,15 @@ static int tcpConnect(const std::string& host, int port) {
     if (fd < 0) {
         std::cerr << "socket() 失败: " << strerror(errno) << std::endl;
         return -1;
+    }
+
+    // 禁用 Nagle。**服务端管不了客户端的 Nagle**：本项目 WssReactor 侧补上
+    // TCP_NODELAY 之后 16KB 档从 82ms/条降到 41ms/条，剩下的 41ms 正是本客户端
+    // 自己发送时被 Nagle 压住等 delayed ACK（约 40ms）造成的。>MSS 的消息会被拆成
+    // 十几段，"最后一段"的等待就在这里体现出来。真实 WebSocket 客户端库默认会设。
+    {
+        int one = 1;
+        setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
     }
 
     struct hostent* he = gethostbyname(host.c_str());

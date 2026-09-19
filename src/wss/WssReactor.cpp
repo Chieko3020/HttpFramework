@@ -10,6 +10,7 @@
 #include <arpa/inet.h>
 #include <fcntl.h>
 #include <netinet/in.h>
+#include <netinet/tcp.h>
 #include <sys/epoll.h>
 #include <sys/eventfd.h>
 #include <sys/socket.h>
@@ -854,6 +855,17 @@ void WssReactor::reactorLoop() {
                         continue;
                     }
                     if (setNonBlocking(cfd) < 0) { ::close(cfd); continue; }
+                    // 与 HTTP 侧保持一致禁用 Nagle。此前 L7 只补了 HTTP 侧的
+                    // HttpServer，WSS 这条 accept 路径漏掉了，后果是：
+                    // **超过 MSS 的消息**（如 16KB 会被拆成十几段）最后一段要等前一段的
+                    // ACK 才发，与 delayed ACK 叠加产生数十毫秒的固定停顿。
+                    // 实测（wss_bench_client，逐条等回显）：16KB 消息 12 msg/s、每条固定
+                    // 82ms（p50 81.9985 / p99 83.2931，分布极窄），而 256B/1KB 是单包、
+                    // 8,055/8,881 msg/s 完全不受影响 —— 这个对比正是 Kane 式延迟的确诊特征
+                    {
+                        int one = 1;
+                        ::setsockopt(cfd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
+                    }
                     if (socketSendBuf_ > 0) {
                         // 测试用：收窄发送缓冲，让大帧必然出现"部分写"（见 setSocketSendBuffer）
                         int snd = socketSendBuf_;

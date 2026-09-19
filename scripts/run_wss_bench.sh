@@ -262,25 +262,29 @@ bench_env_init
 # 缺依赖的语义与 run_http_bench.sh 一致：**退出码 3**（= 缺依赖跳过，不是失败）。
 # 之前这里只打印 [跳过] 就继续跑，脚本最终以 0 结束，与 README 写的"按退出码 3
 # 结束"不符，也让 bench_all.sh 之类的调用方把"什么都没测到"当成成功。
-PREFLIGHT_FAIL=0
+# 三档依赖各自独立：缺某一个只跳过它对应的那一档。
+# 旧逻辑是"任缺其一就 PREFLIGHT_FAIL=1 → exit 3"，实测只缺 wscat(D5) 时
+# D1/D2/D3 明明可跑，却一个结果文件都没产出——把可选工具的缺失升级成了整体失败。
 HAVE_OPENSSL=true
+HAVE_WSCAT=true
+HAVE_CLIENT=true
 if ! bench_has_tool openssl; then
     HAVE_OPENSSL=false
-    echo "[跳过] openssl 不可用：D2(TLS 握手速率)、D3(并发连接) 无法测量"
+    echo "[跳过] openssl 不可用：D2(TLS 握手速率)、D3(并发连接) 跳过"
     echo "       修复: sudo apt install openssl"
-    PREFLIGHT_FAIL=1
 fi
 if ! bench_has_tool wscat; then
+    HAVE_WSCAT=false
     echo "[跳过] wscat 不可用：D5(文件传输) 跳过；修复: npm install -g wscat"
-    PREFLIGHT_FAIL=1
 fi
 if [ ! -x "$BUILD_DIR/examples/wss_bench_client" ]; then
+    HAVE_CLIENT=false
     echo "[跳过] $BUILD_DIR/examples/wss_bench_client 不存在：D1(消息吞吐) 跳过"
     echo "       修复: cmake -S . -B $BUILD_DIR -DENABLE_WSS=ON -DCMAKE_BUILD_TYPE=Release && cmake --build $BUILD_DIR -j2"
-    PREFLIGHT_FAIL=1
 fi
-if [ "$PREFLIGHT_FAIL" -eq 1 ]; then
-    echo "       本次未产生任何结果文件（退出码 3 = 缺依赖跳过，不是失败）"
+# 只有三档全缺才算"无法产出任何结果"
+if [ "$HAVE_OPENSSL" = false ] && [ "$HAVE_WSCAT" = false ] && [ "$HAVE_CLIENT" = false ]; then
+    echo "       三档依赖全缺：本次未产生任何结果文件（退出码 3 = 缺依赖跳过，不是失败）"
     exit 3
 fi
 

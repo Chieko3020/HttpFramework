@@ -1,0 +1,66 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>会话统计 - HttpFramework</title>
+    <style>
+        body { font-family: Arial, sans-serif; margin: 40px; background: #f5f5f5; }
+        .container { max-width: 800px; margin: 0 auto; background: white; padding: 30px; border-radius: 10px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }
+        .header { text-align: center; margin-bottom: 30px; }
+        .stats-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 20px; margin: 20px 0; }
+        .stat-card { background: #f8f9fa; padding: 20px; border-radius: 8px; text-align: center; border: 2px solid #e9ecef; }
+        .stat-number { font-size: 2em; font-weight: bold; color: #17a2b8; margin-bottom: 5px; }
+        .stat-label { color: #6c757d; font-size: 0.9em; }
+        .session-item { margin: 15px 0; padding: 15px; background: #f8f9fa; border-radius: 5px; border-left: 4px solid #17a2b8; }
+        .session-label { font-weight: bold; color: #495057; }
+        .session-value { color: #17a2b8; margin-left: 10px; }
+        .back-link { display: inline-block; margin-top: 20px; padding: 10px 20px; background: #007bff; color: white; text-decoration: none; border-radius: 5px; }
+        .back-link:hover { background: #0056b3; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>会话统计</h1>
+        </div>
+        
+        <div class="stats-grid">
+            <div class="stat-card">
+                <div class="stat-number">{{TOTAL_SESSIONS}}</div>
+                <div class="stat-label">总会话数</div>
+            </div>
+            
+            <div class="stat-card">
+                <div class="stat-number">{{ACTIVE_SESSIONS}}</div>
+                <div class="stat-label">活跃会话</div>
+            </div>
+            
+            <div class="stat-card">
+                <div class="stat-number">30</div>
+                <div class="stat-label">超时时间(分钟)</div>
+            </div>
+            
+            <div class="stat-card">
+                <div class="stat-number">5</div>
+                <div class="stat-label">清理间隔(分钟)</div>
+            </div>
+        </div>
+        
+        <div class="session-item">
+            <span class="session-label">会话超时:</span>
+            <span class="session-value">1800 秒 (30分钟)</span>
+        </div>
+        
+        <div class="session-item">
+            <span class="session-label">清理间隔:</span>
+            <span class="session-value">300 秒 (5分钟)</span>
+        </div>
+        
+        <div class="session-item">
+            <span class="session-label">会话状态:</span>
+            <span class="session-value">正常运行</span>
+        </div>
+        
+        <a href="/" class="back-link">← 返回首页</a>
+    </div>
+</body>
+</html>
