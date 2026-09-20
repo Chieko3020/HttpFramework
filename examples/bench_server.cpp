@@ -155,21 +155,23 @@ int main(int argc, char* argv[]) {
 
     // ── 健康检查 ──────────────────────────────────────────
 
-    // 内存池统计：**仅在 --mempool 启用时**才去碰池实例。
-    // 旧实现无条件调用 GlobalMemoryPool::getInstance()，即使没开内存池也会
-    // 创建一个 5000 块的池（默认 12KB/块，进程 RSS 立刻上涨），
-    // 让内存基准的口径失真（L10）。
-    app.get("/stats", [useMempool](const http::HttpRequest&, http::HttpResponse& res) {
-        if (!useMempool) {
+    // 内存池统计：读**本 server 自持的池**（`app.server()->memoryPool()`）。
+    // 旧实现读进程级 `GlobalMemoryPool::getInstance()`——它与服务实际使用的池是两个
+    // 不同对象，于是压测再久 `alloc_calls` 也恒为 0；而未开池时那次调用还会白创建
+    // 一个 5000 块的池（默认 12KB/块），让内存基准的口径失真（L10）。
+    // 未启用内存池时 `memoryPool()` 本身就是 nullptr，因此不必再判断 --mempool。
+    app.get("/stats", [&app](const http::HttpRequest&, http::HttpResponse& res) {
+        auto srv = app.server();
+        utils::HttpMemoryPool* pool = srv ? srv->memoryPool() : nullptr;
+        if (!pool) {
             res.setJson(R"({"status":"ok","mempool":null})");
             return;
         }
-        auto& pool = utils::GlobalMemoryPool::getInstance();
         res.setJson(std::string(R"({"status":"ok","mempool":{"alloc_calls":)") +
-                    std::to_string(pool.allocCalls()) +
-                    R"(,"dealloc_calls":)" + std::to_string(pool.deallocCalls()) +
-                    R"(,"used_blocks":)" + std::to_string(pool.getUsedBlocks()) +
-                    R"(,"total_blocks":)" + std::to_string(pool.getTotalBlocks()) +
+                    std::to_string(pool->allocCalls()) +
+                    R"(,"dealloc_calls":)" + std::to_string(pool->deallocCalls()) +
+                    R"(,"used_blocks":)" + std::to_string(pool->getUsedBlocks()) +
+                    R"(,"total_blocks":)" + std::to_string(pool->getTotalBlocks()) +
                     R"(}})");
     });
 

@@ -64,6 +64,10 @@ public:
     bool isMemoryPoolEnabled() const { return useMemoryPool_; }
     // 内存池单块容量（即内存池模式下单连接请求的上限）；0 = 未启用/默认
     size_t memoryPoolBlockSize() const { return memoryPoolBlockSize_; }
+    // 本 server 自持的内存池（start() 时创建；未启用内存池时为 nullptr）。
+    // 统计/容量查询**必须读这个实例**：进程级 GlobalMemoryPool 与实际服务使用的池
+    // 是两个对象，读全局单例会永远得到 0（L10）。
+    utils::HttpMemoryPool* memoryPool() const { return ownedMemoryPool_.get(); }
 
     // 空闲连接超时（秒）；<=0 表示不启用超时清理
     void setIdleTimeout(int seconds) { idleTimeoutSec_ = seconds; }

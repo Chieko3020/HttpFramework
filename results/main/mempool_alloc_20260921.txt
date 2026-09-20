@@ -1,23 +1,38 @@
 # 内存池调用频率（/stats 的 mempool.alloc_calls 差分）
-# 分支: main   时间: 2026-09-21T03:57:06+08:00
+# 分支: main   时间: 2026-09-21T04:11:28+08:00
 # 环境: 2 vCPU / 1967 MB / 6.8.0-90-generic
 # 工具: wrk 4.2.0 -t4 -c500 -d30s；被测 /home/ubuntu/Job/projects/personal/HttpFramework/main/build/examples/bench_server --threads 4
-# 用途：判断「内存池默认关闭」的依据——分配调用频率而非单批吞吐
+# 用途：「内存池默认关闭」的依据——分配调用频率而非单批吞吐
+# 说明：/stats 读 HttpServer 自持池（app.server()->memoryPool()），
+#       未启用内存池时该字段为 null（此时服务本就不使用池）
 ---
-### /stats 原始样例：
-{"status":"ok","mempool":null}== 长连接（默认，无池）
-   参数:  连接模式: 长连接  并发 500 / 30s
-   请求数: 1018053   alloc_calls: ? -> ?   增量: 0
-   Requests/sec: 33846.98
+== 长连接（默认，无池）
+   连接模式: 长连接（wrk -t4 -c500 -d30s）  参数: （无）
+   请求数: 1113646   Requests/sec: 37037.89
+   /stats: mempool=null（未启用内存池）
 == 短连接（默认，无池）
-   参数:  连接模式: 短连接  并发 500 / 30s
-   请求数: 358342   alloc_calls: ? -> ?   增量: 0
-   Requests/sec: 11910.22
+   连接模式: 短连接（wrk -t4 -c500 -d30s）  参数: （无）
+   请求数: 405690   Requests/sec: 13493.79
+   /stats: mempool=null（未启用内存池）
 == 长连接（--mempool）
-   参数: --mempool 连接模式: 长连接  并发 500 / 30s
-   请求数: 1062719   alloc_calls: 0 -> 0   增量: 0
-   Requests/sec: 35352.21
+   连接模式: 长连接（wrk -t4 -c500 -d30s）  参数: --mempool
+   请求数: 1167554   Requests/sec: 38824.63
+   alloc_calls: 1 -> 503（增量 502）  dealloc_calls: 503 的增量 502
+   used_blocks: 1 / total_blocks: 5000
+   每千请求分配次数: 0.430
 == 短连接（--mempool）
-   参数: --mempool 连接模式: 短连接  并发 500 / 30s
-   请求数: 346536   alloc_calls: 0 -> 0   增量: 0
-   Requests/sec: 11523.45
+   连接模式: 短连接（wrk -t4 -c500 -d30s）  参数: --mempool
+   请求数: 420792   Requests/sec: 13981.90
+   alloc_calls: 1 -> 421048（增量 421047）  dealloc_calls: 421048 的增量 421047
+   used_blocks: 1 / total_blocks: 5000
+   每千请求分配次数: 1000.606
+
+# 测试套件（2026-09-21T04:13:41+08:00）
+14/14 Test #14: test_http_hardening ..............   Passed   43.08 sec
+
+100% tests passed, 0 tests failed out of 14
+
+Label Time Summary:
+requires-db    =   0.01 sec*proc (1 test)
+
+Total Test time (real) =  75.63 sec

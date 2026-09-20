@@ -65,6 +65,12 @@ add_executable(test_edge_stress test_edge_stress.cpp)
 target_link_libraries(test_edge_stress PRIVATE http_framework)
 target_compile_definitions(test_edge_stress PRIVATE ${TEST_DEFS})
 
+# ── 内存池统计口径回归（L10：统计必须读服务自持池，而非进程级单例）──
+
+add_executable(test_http_mempool_stats test_http_mempool_stats.cpp)
+target_link_libraries(test_http_mempool_stats PRIVATE http_framework)
+target_compile_definitions(test_http_mempool_stats PRIVATE ${TEST_DEFS})
+
 # ── 加固回归测试（深度审查修复项：C1/C2/C3/C4/C5/C6/H1/H2）──
 
 add_executable(test_http_hardening test_http_hardening.cpp)
@@ -87,6 +93,7 @@ set(ALL_TESTS
     test_http_db
     test_edge_input
     test_edge_stress
+    test_http_mempool_stats
     test_http_hardening
 )
 

@@ -749,8 +749,18 @@ HttpFramework/
 因此只表述为**无可观测收益**，不给加速比。池在启动时预分配 5000 块，开池后空载 RSS
 从 4.3 MB 升到 23.9 MB，**默认关闭**。
 
-> 读数提示：`--mempool` 下 `curl /stats` 的 `mempool` 计数读的是进程级 `GlobalMemoryPool`，
-> 而服务实际使用的是 `HttpServer` 自持的池，该计数当前恒为 0，不能用来衡量分配频率。
+分配频率（`curl /stats` 的 `mempool.alloc_calls` 差分；500 并发 × 30 s，原始输出
+`results/main/mempool_alloc_20260921.txt`）：
+
+| 连接模式 | 请求数 | alloc 增量 | 每千请求 |
+|---|---|---|---|
+| 长连接 | 1,167,554 | 502 | 0.43 |
+| 短连接（`Connection: close`） | 420,792 | 421,047 | **1,000.6** |
+
+长连接下每条连接只取一次请求缓冲，调用频率是千分之零点几；短连接下**每请求一次**分配，
+这才是内存池的设计场景——而实测短连接下开池同样没有正向收益（`-t4` 与 `-t2` 两套口径都不给正收益），
+因此不值得为它引入一套预分配与生命周期管理。`--mempool` 下 `/stats` 读的是服务自持的池
+（`app.server()->memoryPool()`），未开池时该字段为 `null`。
 
 ### 短连接
 
@@ -764,7 +774,7 @@ HttpFramework/
 ```bash
 # 默认配置
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release && cmake --build build -j
-cd build && ctest --output-on-failure          # 13/13
+cd build && ctest --output-on-failure          # 14/14
 ```
 
 | 测试文件 | 覆盖内容 | 用例数 |
@@ -780,6 +790,7 @@ cd build && ctest --output-on-failure          # 13/13
 | `test_http_db` | 数据库连接池：初始化/获取/查询/计数/TCP 探测（依赖缺失时明确跳过） | 6 |
 | `test_edge_input` | 异常输入：Header 过大/路径穿越/畸形请求 | 7 |
 | `test_edge_stress` | 并发压力：1000 请求/统计/重启/fd 泄露 | 4 |
+| `test_http_mempool_stats` | 内存池统计口径：未启用为 `nullptr`、启用后指向自持池、计数随请求增长 | 2 |
 | `test_http_hardening` | 加固回归：信号/管线化/框架头/慢速滴灌/畸形请求 | 20 |
 | `test_http_keepalive` | 长连接：复用/管线化/空闲回收 | 5 |
 
