@@ -1,25 +1,25 @@
 === a3_latency: 延迟分布 (带详细分位) ===
 分支: main
-时间: 2026-09-20T09:17:17+08:00
+时间: 2026-09-20T22:10:20+08:00
 环境: 2 vCPU / 1968 MB / Linux 6.8.0-90-generic
 环境-CPU: Intel(R) Xeon(R) Gold 6148 CPU @ 2.40GHz × 2
 环境-gcc: g++ (Ubuntu 13.3.0-6ubuntu2~24.04) 13.3.0
-环境-git-HEAD: 15289e28f39950f70810bf1003af3647d1599231
+环境-git-HEAD: ecfcc9362520290795a690cab8cf4f3edd49d6e6
 环境-wrk: wrk 4.2.0 [epoll] Copyright (C) 2012 Will Glozer
 环境-governor: 不可读（固定失败：sysfs 无 cpufreq 驱动（虚拟机/容器常见）；已尝试 cpupower frequency-set -g performance，无效）
-环境-记录时间: 2026-09-20T09:17:17+08:00
+环境-记录时间: 2026-09-20T22:10:20+08:00
 说明: 压测端与被测服务同机（环回），服务线程数见各项 --threads，wrk 线程数 -t2
 ---
 Running 30s test @ http://localhost:18980/bench/json
   2 threads and 100 connections
   Thread Stats   Avg      Stdev     Max   +/- Stdev
-    Latency     2.67ms    1.05ms  27.57ms   73.25%
-    Req/Sec    18.18k     2.11k   25.22k    71.67%
+    Latency     2.63ms    0.96ms  11.91ms   72.28%
+    Req/Sec    18.49k     2.02k   24.89k    72.00%
   Latency Distribution
-     50%    2.57ms
-     75%    3.22ms
-     90%    3.94ms
-     99%    5.79ms
-  1085953 requests in 30.03s, 208.16MB read
-Requests/sec:  36163.78
-Transfer/sec:      6.93MB
+     50%    2.55ms
+     75%    3.15ms
+     90%    3.81ms
+     99%    5.55ms
+  1104418 requests in 30.02s, 211.70MB read
+Requests/sec:  36790.79
+Transfer/sec:      7.05MB

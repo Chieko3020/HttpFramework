@@ -1,48 +1,48 @@
 === c1_middleware: 不同中间件层数的吞吐量变化 ===
 分支: main
-时间: 2026-09-20T09:24:10+08:00
+时间: 2026-09-20T22:17:12+08:00
 环境: 2 vCPU / 1968 MB / Linux 6.8.0-90-generic
 环境-CPU: Intel(R) Xeon(R) Gold 6148 CPU @ 2.40GHz × 2
 环境-gcc: g++ (Ubuntu 13.3.0-6ubuntu2~24.04) 13.3.0
-环境-git-HEAD: 15289e28f39950f70810bf1003af3647d1599231
+环境-git-HEAD: ecfcc9362520290795a690cab8cf4f3edd49d6e6
 环境-wrk: wrk 4.2.0 [epoll] Copyright (C) 2012 Will Glozer
 环境-governor: 不可读（固定失败：sysfs 无 cpufreq 驱动（虚拟机/容器常见）；已尝试 cpupower frequency-set -g performance，无效）
-环境-记录时间: 2026-09-20T09:24:10+08:00
+环境-记录时间: 2026-09-20T22:17:12+08:00
 说明: 压测端与被测服务同机（环回），服务线程数见各项 --threads，wrk 线程数 -t2
 ---
   --- 中间件层数: 0 ---
 Running 15s test @ http://localhost:18980/bench/plaintext
   2 threads and 100 connections
   Thread Stats   Avg      Stdev     Max   +/- Stdev
-    Latency     2.44ms    0.95ms  19.78ms   72.95%
-    Req/Sec    19.98k     2.28k   25.48k    61.00%
-  596559 requests in 15.01s, 102.98MB read
-Requests/sec:  39738.37
-Transfer/sec:      6.86MB
+    Latency     2.54ms    0.96ms  12.92ms   71.55%
+    Req/Sec    19.18k     2.02k   25.64k    65.67%
+  572990 requests in 15.01s, 98.91MB read
+Requests/sec:  38167.74
+Transfer/sec:      6.59MB
   --- 中间件层数: 1 ---
 Running 15s test @ http://localhost:18980/bench/plaintext
   2 threads and 100 connections
   Thread Stats   Avg      Stdev     Max   +/- Stdev
-    Latency     2.60ms    1.02ms  23.40ms   73.84%
-    Req/Sec    18.75k     1.99k   24.72k    69.33%
-  559977 requests in 15.02s, 96.66MB read
-Requests/sec:  37279.80
-Transfer/sec:      6.44MB
+    Latency     2.62ms    1.01ms  15.49ms   72.04%
+    Req/Sec    18.60k     2.11k   25.18k    67.67%
+  555405 requests in 15.01s, 95.87MB read
+Requests/sec:  36996.97
+Transfer/sec:      6.39MB
   --- 中间件层数: 5 ---
 Running 15s test @ http://localhost:18980/bench/plaintext
   2 threads and 100 connections
   Thread Stats   Avg      Stdev     Max   +/- Stdev
-    Latency     2.37ms    1.00ms  11.28ms   70.42%
-    Req/Sec    20.39k     2.07k   27.54k    67.67%
-  609289 requests in 15.02s, 105.17MB read
-Requests/sec:  40569.73
-Transfer/sec:      7.00MB
+    Latency     2.61ms    1.08ms  13.17ms   70.93%
+    Req/Sec    18.65k     2.31k   27.36k    67.33%
+  556973 requests in 15.01s, 96.14MB read
+Requests/sec:  37102.40
+Transfer/sec:      6.40MB
   --- 中间件层数: 10 ---
 Running 15s test @ http://localhost:18980/bench/plaintext
   2 threads and 100 connections
   Thread Stats   Avg      Stdev     Max   +/- Stdev
-    Latency     2.60ms    1.30ms  35.51ms   79.83%
-    Req/Sec    18.62k     2.04k   25.15k    75.67%
-  556627 requests in 15.02s, 96.08MB read
-Requests/sec:  37047.63
-Transfer/sec:      6.39MB
+    Latency     2.82ms    1.20ms  12.94ms   70.89%
+    Req/Sec    17.26k     2.27k   25.89k    72.00%
+  515738 requests in 15.03s, 89.02MB read
+Requests/sec:  34323.37
+Transfer/sec:      5.92MB

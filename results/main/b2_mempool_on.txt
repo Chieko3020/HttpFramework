@@ -1,20 +1,20 @@
 === b2_mempool_on: 内存池 ON 时的吞吐量 ===
 分支: main
-时间: 2026-09-20T09:22:34+08:00
+时间: 2026-09-20T22:15:36+08:00
 环境: 2 vCPU / 1968 MB / Linux 6.8.0-90-generic
 环境-CPU: Intel(R) Xeon(R) Gold 6148 CPU @ 2.40GHz × 2
 环境-gcc: g++ (Ubuntu 13.3.0-6ubuntu2~24.04) 13.3.0
-环境-git-HEAD: 15289e28f39950f70810bf1003af3647d1599231
+环境-git-HEAD: ecfcc9362520290795a690cab8cf4f3edd49d6e6
 环境-wrk: wrk 4.2.0 [epoll] Copyright (C) 2012 Will Glozer
 环境-governor: 不可读（固定失败：sysfs 无 cpufreq 驱动（虚拟机/容器常见）；已尝试 cpupower frequency-set -g performance，无效）
-环境-记录时间: 2026-09-20T09:22:34+08:00
+环境-记录时间: 2026-09-20T22:15:36+08:00
 说明: 压测端与被测服务同机（环回），服务线程数见各项 --threads，wrk 线程数 -t2
 ---
 Running 30s test @ http://localhost:18980/bench/plaintext
   2 threads and 500 connections
   Thread Stats   Avg      Stdev     Max   +/- Stdev
-    Latency    14.47ms    3.67ms  35.54ms   70.87%
-    Req/Sec    16.91k     1.50k   25.16k    83.14%
-  1011205 requests in 30.10s, 174.55MB read
-Requests/sec:  33596.25
-Transfer/sec:      5.80MB
+    Latency    13.49ms    4.12ms  37.96ms   69.12%
+    Req/Sec    17.97k     2.70k   26.13k    69.90%
+  1073973 requests in 30.06s, 185.38MB read
+Requests/sec:  35730.35
+Transfer/sec:      6.17MB

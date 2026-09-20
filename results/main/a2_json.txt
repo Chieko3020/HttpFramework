@@ -1,20 +1,20 @@
 === a2_json: JSON 响应吞吐量 ===
 分支: main
-时间: 2026-09-20T09:16:46+08:00
+时间: 2026-09-20T22:09:48+08:00
 环境: 2 vCPU / 1968 MB / Linux 6.8.0-90-generic
 环境-CPU: Intel(R) Xeon(R) Gold 6148 CPU @ 2.40GHz × 2
 环境-gcc: g++ (Ubuntu 13.3.0-6ubuntu2~24.04) 13.3.0
-环境-git-HEAD: 15289e28f39950f70810bf1003af3647d1599231
+环境-git-HEAD: ecfcc9362520290795a690cab8cf4f3edd49d6e6
 环境-wrk: wrk 4.2.0 [epoll] Copyright (C) 2012 Will Glozer
 环境-governor: 不可读（固定失败：sysfs 无 cpufreq 驱动（虚拟机/容器常见）；已尝试 cpupower frequency-set -g performance，无效）
-环境-记录时间: 2026-09-20T09:16:46+08:00
+环境-记录时间: 2026-09-20T22:09:48+08:00
 说明: 压测端与被测服务同机（环回），服务线程数见各项 --threads，wrk 线程数 -t2
 ---
 Running 30s test @ http://localhost:18980/bench/json
   2 threads and 100 connections
   Thread Stats   Avg      Stdev     Max   +/- Stdev
-    Latency     2.58ms    1.02ms  15.70ms   72.22%
-    Req/Sec    18.86k     1.86k   26.50k    68.17%
-  1126477 requests in 30.02s, 215.93MB read
-Requests/sec:  37522.27
-Transfer/sec:      7.19MB
+    Latency     2.58ms    1.00ms  20.77ms   74.35%
+    Req/Sec    18.91k     2.40k   25.33k    69.33%
+  1129869 requests in 30.03s, 216.58MB read
+Requests/sec:  37625.76
+Transfer/sec:      7.21MB
