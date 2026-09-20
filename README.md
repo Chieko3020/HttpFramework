@@ -1,13 +1,13 @@
 # HttpFramework
 
-- Linux 下 C++ HTTP/1.1 服务框架，基于多 Reactor + 线程池架构（main Reactor accept + sub Reactor I/O + 线程池业务），实现 C++ 项目快速导入并搭载 HTTP 服务
-- epoll ET 模式 + 非阻塞 I/O，支持高并发
-- 路由系统：静态路由、动态路由（`:id`）、通配符路由、正则匹配
-- 中间件系统：链式处理，支持路径过滤，易于扩展
-- 会话管理：Session/Cookie 完整生命周期管理，自动过期清理，线程安全
-- MySQL 连接池：连接复用、健康检查、事务支持，简化数据库操作
-- 固定大小内存池：12KB 块，零动态分配，避免内存碎片，线程安全
-- 开发环境：WSL Ubuntu 24.04 LTS & Visual Studio Code, CMake 3.28.3 & MySQL 8.0.42
+## 项目描述
+
+HttpFramework 是一个 C++17 的 HTTP 服务框架。
+它覆盖从 socket 到业务处理的完整一层：多 Reactor 网络层、HTTP/1.1 解析与响应构造、
+路由匹配、链式中间件、会话管理，以及基于线程池的异步处理模型。网络层由本项目实现，
+不引入第三方网络库；接入方式是一个 CMake 目标，可以被 `find_package(HttpFramework)` 引入。
+
+规模约 6,700 行（`src/` + `include/`）；测试为 13 个 ctest 目标、115 个用例。
 
 ## 快速开始
 
@@ -17,33 +17,20 @@
 # 必需
 sudo apt install build-essential cmake libboost-all-dev
 
-# 可选：数据库支持
+# 可选：数据库支持（未安装时相关功能与测试自动跳过）
 sudo apt install libmysqlcppconn-dev
 
-# 可选：性能基准测试
-sudo apt install wrk bc
+# 可选：性能基准
+sudo apt install wrk
 ```
 
-MySQL Connector/C++ 可选 — 未安装时数据库功能自动禁用，服务器正常启动。
-`wrk` 和 `bc` 仅用于性能基准测试脚本，不影响框架编译和运行。
-
-### 编译 & 运行
+### 构建
 
 ```bash
-cmake -S . -B build && cmake --build build
-./build/examples/hello_world     # 最简示例（无 DB 依赖，4 个路由）
-./build/examples/full_demo       # 完整演示（路由/会话/DB/模板，MySQL 不可用时自动降级）
+# 基础构建
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build -j
 ```
-
-访问 `http://localhost:8080`
-
-### 作为库安装
-
-```bash
-cmake --install build --prefix /usr/local
-```
-
-之后外部项目可通过 `find_package(HttpFramework REQUIRED)` 直接引用。
 
 ## 两种使用方式
 
@@ -179,7 +166,35 @@ app.get("/db/users", [&app](auto& req, auto& res) {
 
 直接使用 `HttpServer`、`Router`、`SessionManager`、`DbConnectionPool` 等底层类，自由组装。参考 `examples/full_demo.cpp`，展示了手动管理信号处理、全局资源生命周期、端口检测等用法。
 
-## 外部项目集成
+### 示例程序暴露的端点
+
+`full_demo` 在 8080 端口启动后，可直接访问以下端点验证各模块：
+
+| 端点 | 说明 |
+|------|------|
+| `/` | 首页 |
+| `/api/status` | 服务状态 |
+| `/api/stats` | 框架内部统计 |
+| `/api/time` | 服务端时间 |
+| `/api/echo` | 请求回显（POST） |
+| `/session/info` | 当前会话信息 |
+| `/session/stats` | 会话统计 |
+| `/session/set` | 写入会话数据（POST） |
+| `/db/test` | 数据库连接测试 |
+| `/db/users` | 用户列表（GET 查询 / POST 新增） |
+| `/db/add-user` | 添加用户表单 |
+
+```bash
+# 压力测试
+wrk -t4 -c100 -d30s http://localhost:8080/
+
+# 接口检查
+curl http://localhost:8080/api/status
+```
+
+数据库相关端点需要 MySQL；未配置时 `enableDatabase` 会自动降级，服务器仍能正常启动。
+
+## 集成到现有项目
 
 HttpFramework 安装后可作为 CMake 包被外部项目引用。
 
@@ -223,6 +238,34 @@ cmake --build build
 cmake -S . -B build -DBUILD_EXAMPLES=OFF
 cmake --build build
 ```
+
+## 功能特性
+
+### HTTP 与路由
+
+- **HTTP/1.1 解析与响应构造**：请求行/头部/正文字节级解析，含 400（畸形请求）、413（超限）等边界；
+  HEAD 抑制响应体但保留 `Content-Length`；支持静态文件与模板渲染
+- **三类路由匹配**：静态路径（哈希）、`:param` 动态段（分段匹配）、`*` 通配符（正则回退）；
+  按 method 建索引，路径先按段切分再匹配，避免逐条正则
+- **链式中间件**：洋葱模型 + 路径前缀过滤；鉴权、日志、限流等横切逻辑挂在这里
+- **会话管理**：内存与文件两种存储，Cookie 生命周期（含滑动续期）、过期清理
+
+### 并发模型
+
+- **多 Reactor**：1 个主 Reactor 只做 accept，按 round-robin 把连接分给 N 个子 Reactor；
+  每连接注册 `EPOLLIN | EPOLLET | EPOLLONESHOT`
+- **独立线程池**：业务逻辑不在 Reactor 线程里跑，交给共享线程池；响应回写经 **eventfd** 唤醒
+  子 Reactor 完成（工作线程不直接操作别人的 epoll）
+- **HTTP 长连接**：支持 keep-alive 与空闲超时回收；管线化请求按序处理
+- **固定块内存池（可选）**：请求/响应缓冲从预分配块里取，块大小与块数可配
+
+### 能力边界
+
+- 只实现 **HTTP/1.1**（无 HTTP/2、HTTP/3）；不含反向代理、负载均衡、限流
+- **单进程单实例**，无集群与主备；会话默认在内存，多实例间不共享
+- 数据库层是**可选封装**（连接池 + 查询接口），不是 ORM
+- 内存池对大响应不友好：请求侧超块回 413，响应侧超块回退 `std::string`
+- 仅 Linux（epoll + eventfd）
 
 ## 模块组成
 
@@ -282,69 +325,67 @@ cmake --build build
 - **模板引擎**：HTML 模板加载和 `{{variable}}` 变量替换
 - **信号处理**：SIGINT/SIGTERM 优雅关闭
 
-## 关键组件
+## 架构
 
-### HttpServer — 核心服务器
+### 线程模型：多 Reactor + 线程池
 
-多 Reactor 架构：main Reactor 线程仅处理 accept，round-robin 将连接分发给 sub Reactor；每个 sub Reactor 独立 epoll 线程处理 read/write；业务逻辑提交到线程池。
-
-```cpp
-class HttpServer {
-    // main Reactor — accept + 分发
-    void mainReactorLoop();
-    void handleAccept();
-    // sub Reactor — read/write（每个线程一个）
-    void subReactorLoop(int index);
-    void handleRead(int fd, int reactorIdx);
-    void handleWrite(int fd, int reactorIdx);
-    // 业务处理（线程池）
-    void enableMemoryPool(bool enable = true);  // 启用内存池
-};
+```
+                      ┌─────────────────────────────────────────┐
+   客户端连接 ────────▶│ 主 Reactor 线程                          │
+                      │   epoll_wait 只做 accept                 │
+                      └────────────────┬────────────────────────┘
+                                       │ round-robin 分发
+                  ┌────────────────────┼────────────────────┐
+                  ▼                    ▼                    ▼
+         ┌────────────────┐   ┌────────────────┐   ┌────────────────┐
+         │ 子 Reactor 0   │   │ 子 Reactor 1   │   │ 子 Reactor N   │
+         │ EPOLLIN|ET     │   │ ...            │   │ ...            │
+         │ |ONESHOT       │   │                │   │                │
+         └───────┬────────┘   └───────┬────────┘   └───────┬────────┘
+                 │  请求收齐后入队      │                    │
+                 └───────────┬─────────┴────────────────────┘
+                             ▼
+                  ┌──────────────────────────┐
+                  │ 共享线程池（默认 4 线程） │  业务处理：中间件链 → 路由 → handler
+                  └───────────┬──────────────┘
+                              │ 写响应：push 到目标连接的 pendingWrites
+                              │ 然后 write(eventfd) 唤醒**属于该连接**的子 Reactor
+                              ▼
+                  子 Reactor 线程：从队列取出 → EPOLL_CTL_MOD 重新注册 → send
 ```
 
-### Router — 路由引擎
+**为什么不让工作线程直接 send / 改 epoll**：子 Reactor 的 epoll 实例是被它自己的线程独占的，
+工作线程去 `EPOLL_CTL_MOD` 相当于两个线程并发操作同一个 epoll；而且连接注册的是 `EPOLLONESHOT`，
+从别的线程改状态会打乱"一次事件一次处理"的语义，可能造成重复投递或丢失事件。
+所以回写动作经 `eventfd` 唤醒后**收敛回子 Reactor 线程**执行。
 
-基于正则表达式的路径匹配，支持静态路由、动态参数路由、通配符路由。
+### 请求生命周期
 
-```cpp
-class Router {
-    void get(const std::string& path, Handler handler);
-    void post(const std::string& path, Handler handler);
-    void put(const std::string& path, Handler handler);
-    void del(const std::string& path, Handler handler);
-    void use(const std::string& path, Middleware middleware);
-    void use(Middleware middleware);             // 全局中间件
-    void setNotFoundHandler(Handler handler);
-    Route* findRoute(const std::string& method, const std::string& path);
-};
+```mermaid
+sequenceDiagram
+    participant C as 客户端
+    participant SR as 子 Reactor
+    participant TP as 线程池
+    participant H as 业务处理
+    C->>SR: TCP 数据到达（EPOLLIN|EPOLLONESHOT）
+    SR->>SR: recv 进连接缓冲，解析请求；半包则等下一次事件
+    SR->>TP: enqueueDetached(请求任务)
+    Note over SR: ONESHOT 已消费，暂不再监听该连接
+    TP->>H: 中间件链 → 路由匹配 → handler
+    H->>H: 生成响应（序列化）
+    H->>SR: pendingWrites.push(connId) + write(eventfd)
+    SR->>SR: EPOLL_CTL_MOD 重新注册 EPOLLIN|ONESHOT
+    SR->>C: send 响应
+    Note over SR,C: keep-alive 则继续等待下一个请求；空闲超时回收连接
 ```
 
-### SessionManager — 会话管理器
+### 连接生命周期
 
-管理 Session 的完整生命周期，支持自动过期清理和线程安全访问。
-
-```cpp
-class SessionManager {
-    std::shared_ptr<Session> createSession();
-    std::shared_ptr<Session> getSession(const std::string& sessionId);
-    void removeSession(const std::string& sessionId);
-    void cleanupExpiredSessions();
-    void startCleanupThread(std::chrono::seconds interval);
-};
-```
-
-### MemoryPool — 内存池
-
-固定大小内存块（12KB），预分配 5000 个块（共 60MB）。使用栈结构管理空闲块，O(1) 分配/释放，互斥锁保证线程安全。
-
-```cpp
-class MemoryPool {
-    void* allocate();                           // O(1) 获取空闲块
-    void deallocate(void* ptr);                 // O(1) 归还块
-    size_t getAvailableBlocks() const;
-    size_t getTotalBlocks() const;
-};
-```
+- **归属校验**：每个连接用 `ConnId = (generation << 32) | fd` 标识。fd 会被内核复用，
+  只按 fd 记录会让"旧连接的回调"误伤刚建立的新连接（这正是早期一个真实缺陷的根因）
+- **半关闭处理**：对端 FIN 后先把缓冲读尽再判 EOF；只发 FIN 不一定产生新边沿（ET 下尤其要注意），
+  所以每个 epoll 节拍会主动检查各连接的空闲与 read 状态
+- **优雅停机**：`stop()` 先排空在途业务任务，再释放成员，避免共享线程池上的任务访问已析构对象
 
 ## 工作原理
 
@@ -463,75 +504,74 @@ void SessionManager::cleanupExpiredSessions() {
 }
 ```
 
+## 核心组件
+
+| 组件 | 职责与关键设计 |
+|---|---|
+| **HttpServer** | epoll ET + `EPOLLONESHOT` 主循环、accept 分发、连接表（代际校验）、空闲超时扫描、连接数上限 |
+| **ConnectionHandler** | 单连接读写状态机：半包、管线化、EOF、`Content-Length`/chunked 边界 |
+| **HttpRequest / HttpResponse** | 解析与构造：URL 解码、头名大小写归一化、`HEAD` 抑制响应体、序列化用 reserve + 直接拼接 |
+| **Router** | 静态哈希 + `:param` 分段匹配 + `*` 正则回退；method 索引；运行期注册走"拷贝-换入"快照 |
+| **Middleware** | 洋葱模型 + 路径前缀过滤；入口处一次性算好匹配列表，避免每请求整表重算 |
+| **SessionManager** | 内存 / 文件两种存储、Cookie 生命周期（滑动续期）、过期清理、文件存储 ID 白名单 + 原子写 |
+| **MemoryPool** | 固定块（默认 12 KB × 5000）、惰性初始化、分配计数可观测、可运行期开关（默认关闭） |
+| **ThreadPool** | 任务队列 + 状态统计；`enqueueDetached` 提供无 `packaged_task`/`future` 的轻量路径 |
+
+## 关键设计与取舍
+
+**回写为什么走 eventfd。** 子 Reactor 的 epoll 实例被它自己的线程独占，工作线程直接
+`EPOLL_CTL_MOD` 等于两个线程并发操作同一个 epoll；再加上连接注册的是 `EPOLLONESHOT`，
+跨线程改状态会打乱"一次事件一次处理"的语义。用 `eventfd` 把回写收敛回 Reactor 线程，
+代价是每次响应多一次跨线程唤醒（实测这个开销远小于并发操作 epoll 的风险）。
+
+**为什么做固定块内存池，以及为什么默认关闭。** 动机是"高频分配"——早期是短连接形态，
+每请求新建/销毁缓冲。但长连接改造之后，500 并发 30 秒里池的 `allocate/deallocate`
+只增加 1002 次（每千请求约 1 次），复用度已经由连接本身提供；在 glibc 的 per-thread
+`tcache` 面前，这把带锁的池不再有优势。三轮交替复测的方向分别是 −3.5% / +6.1% / +1.1%，
+**只能说"无可观测收益"**，所以默认关闭（另外它会预分配约 20 MB）。
+
+**响应序列化。** 早期实现逐个字段拼接、反复扩容；现在先 `reserve` 再直接拼接，
+并把 `Date` 头按秒缓存，避免每个响应都做一次时间格式化。
+
+**路径参数怎么塞回请求对象。** 路由匹配出的 `:param` 需要交给 handler。当前实现由
+`RouterHandler` 用 `const_cast` 把参数写回 `HttpRequest`——它不在"未定义行为"的意义上有问题
+（对象本身不是 const），但确实是个不漂亮的接口，记在待办里。
+
 ## 项目难点
 
-### 技术难点
+### ① 跨线程回写：工作线程不能碰别人的 epoll
 
-#### 1. 高并发设计
+**难在哪**：连接注册的是 `EPOLLONESHOT`，事件被消费后必须由**同一个** Reactor 线程重新注册。
+第一版让工作线程直接对子 Reactor 的 epoll 做 `EPOLL_CTL_MOD`，问题有两个：
+① 两个线程并发操作同一个 epoll 实例；② oneshot 状态下 MOD 会重置状态，可能重复投递或丢事件。
 
-**如何设计高效的并发模型以支持数千并发连接？**
+**怎么做的**：每个子 Reactor 一个 `eventfd` + 一个 `pendingWrites` 队列。工作线程只做两件事：
+把连接的 `ConnId` push 进队列、`write(eventfd)`。send 与重新注册全部收敛回子 Reactor 线程。
+**顺带**：正因为回写带了 `ConnId`，这里必须做归属校验（见 ③），否则队列里躺着的旧连接
+回调会打到已经复用同一 fd 的新连接上。
 
-采用多 Reactor 模型：main Reactor 线程仅 accept + round-robin 分发连接。sub Reactor 线程（默认 `hardware_concurrency` 个）各带独立 epoll，分别处理自己那组连接的 read/write。业务逻辑提交到线程池异步执行，避免阻塞 sub Reactor。ET 模式减少 epoll_wait 调用频率，非阻塞 I/O 避免线程空等。
+### ② 内存池带来的两个问题
 
-```cpp
-// epoll ET 模式配置
-int epollFd_ = epoll_create1(EPOLL_CLOEXEC);
-struct epoll_event event;
-event.events = EPOLLIN | EPOLLET;               // 边缘触发
-event.data.fd = clientFd;
-epoll_ctl(epollFd_, EPOLL_CTL_ADD, clientFd, &event);
-```
+**问题一：12 KB 单块导致响应被静默截断。** `HttpContext::setResponseData` 在池模式下
+调 `responseBuffer_->write(data)` 却**忽略返回值**，而单块只有 12 KB。现象很隐蔽：
+响应头写着 `Content-Length: 20000`，客户端实收 12117–12289 字节，keep-alive 下后续请求还会错位。
+修法是响应侧超限回退 `std::string`、请求侧比对实际写入字节数并回 413（带 `{"limit":...}`）。
 
-#### 2. 内存管理
+**问题二：它其实没有收益。** 长连接改造之后池的调用频率降到每千请求约 1 次
+（500 并发 30 秒累计 1,008,350 请求，`allocate/deallocate` 只增加 1,002 次），
+三轮交替复测方向翻转。**结论是默认关闭**——理由是无收益 + 多占约 20 MB，而不是"性能更差"。
 
-**如何避免内存泄漏和频繁的内存分配/释放？**
+### ③ 连接生命周期与 fd 归属：陈旧回调误杀新连接
 
-预分配 12KB 固定大小内存块（5000 块，共 60MB），栈结构管理空闲块，O(1) 分配/释放。RAII + 智能指针管理对象生命周期，零拷贝减少不必要的数据复制。
+**难在哪**：fd 会被内核复用。只按 fd 记录连接状态时，"上一个连接的回调"可能作用在
+**刚复用同一 fd 的新连接**上。现象是服务端日志里出现**两条相同 fd 的关闭记录**
+（分别来自不同的子 Reactor），而新连接复用几次之后就被单方面断开——客户端看到的是"莫名 RST"。
 
-```cpp
-class MemoryPool {
-    std::stack<void*> availableBlocks_;          // 空闲块栈，O(1) 操作
-    std::mutex mutex_;                           // 线程安全
-    static constexpr size_t BLOCK_SIZE = 12288;  // 12KB
-};
-```
+**怎么做的**：连接标识改为 `ConnId = (generation << 32) | fd`，所有回写与关闭都带归属校验，
+代际不匹配就丢弃。复测：记录恒为每 Reactor 各一条、连接复用 8–17 次全部正常。
 
-#### 3. 线程安全
-
-**多线程环境下的数据同步和竞态条件处理？**
-
-关键数据结构使用互斥锁保护，原子变量（`std::atomic`）减少锁竞争，细粒度锁设计避免大范围加锁。SessionManager、MemoryPool、DbConnectionPool 各自持有独立锁。
-
-```cpp
-class SessionManager {
-    mutable std::mutex sessionsMutex_;
-    std::unordered_map<std::string, std::shared_ptr<Session>> sessions_;
-};
-```
-
-#### 4. 性能优化
-
-**如何减少系统调用和内存拷贝，提高整体性能？**
-
-- epoll ET 模式减少 epoll_wait 调用次数
-- 内存池消除频繁 malloc/free 的开销和碎片
-- ET 模式循环读取，一次事件通知处理全部数据
-- 正则表达式编译缓存，避免重复编译路径模式
-
-#### 5. 错误处理与资源管理
-
-**如何设计完善的异常处理和恢复机制？**
-
-RAII + 智能指针保证异常安全——无论正常还是异常路径，资源自动释放。数据库连接池初始化失败时自动降级，不影响服务器启动。析构函数中捕获异常，防止资源泄漏。
-
-```cpp
-class HttpServer {
-    ~HttpServer() {
-        try { stop(); }                         // 优雅关闭
-        catch (...) { /* 不抛出 */ }
-    }
-};
-```
+**为什么值得讲**：这类缺陷在压测里表现为"偶发连接断开"，很容易被归因成"客户端或网络问题"
+而放过去；把它定位到"fd 复用 + 缺少代际"需要先怀疑自己的状态模型。
 
 ### 工程难点
 
@@ -569,19 +609,77 @@ HttpFramework/
 └── init.sql                            # 数据库初始化脚本
 ```
 
-## 功能验证
+## 实测性能
 
-### 单元测试
+> 环境：2 vCPU / 1968 MB 的 VPS（**压测端与被测服务同机 loopback**），服务线程池 4，`wrk 4.2.0`（`-t4`）
+> 测量脚本：`scripts/bench_http.sh`（HTTP）——该脚本启动服务后会等端口就绪并确认进程存活，结果落盘 `results/`
+> 下表是 2026-09-20 用该脚本重跑的一批，原始输出为 `results/http_bench_20260920_0639.txt`。与更早批次相比，每请求 CPU 与短连接吞吐有差异（机器状态不同）
 
-项目包含完整的单元测试套件（13 项，115 个测试用例），覆盖全部核心模块：
+### 并发梯度（长连接）
+
+| 并发 | 吞吐 (req/s) | p50 | p99 | socket 错误 |
+|---|---|---|---|---|
+| 100 | 34,042 | 2.74 ms | 6.43 ms | 0 |
+| 500 | 34,530 | 13.91 ms | 26.53 ms | 0 |
+| 1000 | 33,032 | 29.45 ms | 51.45 ms | 0 |
+| 2000 | 31,629 | 61.53 ms | 99.44 ms | 0 |
+| 5000 | **30,917** | 157.43 ms | 233.57 ms | 0 |
+
+**读法**：多次测量落在 **30k–38k** 区间（±6%），这一批在 31k–35k。**5,000 并发下仍保持 3 万 req/s 且零 socket 错误**。
+延迟随并发近似线性增长（符合 `延迟 ≈ 并发 ÷ 吞吐` 的排队关系），所以"低延迟"与"高并发"必须**同时标注档位**才有意义。
+
+### 每请求 CPU
+
+| 指标 | 数值 |
+|---|---|
+| 每请求 CPU（c=1000，`/proc/<pid>/stat` 差分 ÷ 请求数） | **37.1 µs**（3478 jiffies / 936,791 请求） |
+
+更早批次用同一方法测到 32.3 µs —— 差异来自机器状态而非代码改动；该批次原始输出未入库，仅作对照参考。
+
+### 路由与中间件的重复匹配（优化前后对照）
+
+| 场景 | 优化前 | 优化后 |
+|---|---|---|
+| 50 层中间件（c=1000） | 1,810 req/s | **31,134 req/s（×17.2）** |
+| 500 条路由、命中**末条** | 11,069 req/s | **40,115 req/s（×3.6）** |
+| 500 条路由、命中靠前 | —— | ×1.11 |
+
+根因是每个请求都把中间件链与路由表**整表重算**（`findMiddlewares` 走 O(M) 正则、路由逐条匹配）。
+改动是入口处一次性算好中间件列表，路由改为 method 索引 + 静态哈希 + 分段匹配。
+"命中靠前只有 ×1.11"说明收益来自"**找得对不对**"，而不是"找得快"。
+
+### 内存池：无可观测收益
+
+交替执行（默认 ↔ `--mempool`），各 30 秒：
+
+| 轮次 | 无池 (req/s) | 开池 (req/s) |
+|---|---|---|
+| 1 | 35,914 | 34,885 |
+| 2 | 31,444 | 32,466 |
+| 3 | 31,442 | 33,915 |
+
+**三轮方向不一致**（第 1 轮无池快、第 2/3 轮开池快），差异全在噪声内 ⇒ 只能表述为**无可观测收益**，不给百分比。
+原因是池的调用频率太低：500 并发 30 秒累计 1,008,350 请求，`allocate/deallocate` 只增加 **1,002 次**
+（每千请求约 1 次，可用 `curl /stats` 读 `mempool.alloc_calls` 复现）。**因此默认关闭**，
+理由是无收益 + 多占约 20 MB。
+
+### 短连接
+
+三次测量是 10,590 / 10,895 / 13,820 req/s。短连接吞吐受客户端端口与 TIME_WAIT 资源影响、
+波动可达 30%+，**只作区间参考（约 1.0–1.4 万 req/s）**，不参与任何结论。
+
+## 测试与基准
+
+### 单元与集成测试
 
 ```bash
+# 默认配置
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release && cmake --build build -j
 cd build && ctest --output-on-failure          # 13/13
 ```
 
-| 测试文件 | 模块 | 用例数 |
-|----------|------|--------|
+| 测试文件 | 覆盖内容 | 用例数 |
+|---|---|---|
 | `test_infra_threadpool` | 线程池：入队/批量/队列/关闭/状态 | 9 |
 | `test_infra_mempool` | 内存池：分配/FIFO/耗尽/RAII/统计 | 11 |
 | `test_infra_logger` | 日志：级别过滤/模块过滤/输出 | 6 |
@@ -590,81 +688,46 @@ cd build && ctest --output-on-failure          # 13/13
 | `test_http_session` | 会话：CRUD/过期/清理/Cookie | 13 |
 | `test_http_response` | 响应构建：HTML/JSON/File/Binary/重定向 | 12 |
 | `test_http_template` | 模板：加载/变量替换/fallback | 5 |
-| `test_http_db` | 数据库连接池：初始化/获取/查询/计数/TCP 探测（无库时 1 通过 + 5 跳过） | 6 |
+| `test_http_db` | 数据库连接池：初始化/获取/查询/计数/TCP 探测（依赖缺失时明确跳过） | 6 |
 | `test_edge_input` | 异常输入：Header 过大/路径穿越/畸形请求 | 7 |
 | `test_edge_stress` | 并发压力：1000 请求/统计/重启/fd 泄露 | 4 |
 | `test_http_hardening` | 加固回归：信号/管线化/框架头/慢速滴灌/畸形请求 | 20 |
 | `test_http_keepalive` | 长连接：复用/管线化/空闲回收 | 5 |
 
-### 性能基准测试
+**"跳过"是独立的第三种结果**：需要外部依赖（数据库）的用例在依赖缺失时明确 SKIP 并打印原因，
+**不计入通过**——例如数据库已装但服务未启动时 `test_http_db` 是"1 通过 + 5 跳过"、退出码 0；
+完全未编译数据库支持时它只跑 1 个用例。
+（ctest 自 3.16 起可用 `SKIP_RETURN_CODE` / `SKIP_REGULAR_EXPRESSION` 表达"跳过"，本项目尚未采用。）
 
-提供参数化基准服务器和自动化测定脚本，支持 HTTP 全指标测定：
+**测试设计**：全部使用真实文件系统 + 真实 loopback socket，**不用 mock**。
+好处是能覆盖真实的失败路径：`EADDRINUSE` 端口冲突、缺失文件回 404、模板缺失 fallback、
+session 过期与清理、中间件鉴权短路 401、`shutdown` 后 `enqueue` 抛异常、内存池耗尽返回 `nullptr`。
 
-```bash
-# 安装依赖
-sudo apt install wrk
-
-# 启动基准服务器（参数化配置）
-./build/examples/bench_server --port 8080 --threads 4 --mempool --routes 100
-
-# 运行全指标测定 (~3 分钟)
-bash scripts/run_http_bench.sh main results/main
-
-# 生成报告
-bash scripts/generate_report.sh
-
-# 或使用标准化入口：启动服务前会校验监听者身份，不通过则整批作废
-bash scripts/bench_http.sh          # 全量：并发梯度 + 每请求 CPU + 内存池交替 + 短连接（约 8 分钟）
-bash scripts/bench_http.sh quick    # 快速回归：100/1000 两档 + 内存池单轮（约 2 分钟）
-```
-
-> **注意**：使用 `--template` 选项时需在 build 目录下运行（`cd build && ./examples/bench_server ...`），
-> 确保 `templates/` 目录可访问。Template 不可用时端点返回 404 而非空响应。
-
-基准服务器 CLI 选项：
-
-| 选项 | 默认值 | 说明 |
-|------|--------|------|
-| `--port PORT` | 8080 | HTTP 端口 |
-| `--threads N` | 4 | 工作线程数 |
-| `--mempool` | off | 启用 12KB 固定块内存池 |
-| `--routes N` | 0 | 额外注册 N 条路由 (测路由扩展性, 最大 5000) |
-| `--middleware N` | 0 | 额外全局中间件层数 (最大 50) |
-| `--session` | off | 启用 Session 中间件 |
-| `--template` | off | 启用 Template 端点 |
-
-测定覆盖：
-
-| 指标 ID | 内容 | 工具 |
-|---------|------|------|
-| A1-A5 | HTTP 吞吐量/延迟分布/最大并发/内存占用 | `wrk` |
-| B1-B3 | 线程扩展性/内存池收益/路由退化 | `wrk` |
-| C1-C2 | 中间件开销/会话开销 | `wrk` |
-
-启动 `full_demo` 后可用端点：
-
-| 端点 | 说明 |
-|------|------|
-| `http://localhost:8080/` | 首页（模板渲染） |
-| `http://localhost:8080/api/status` | 服务器状态 |
-| `http://localhost:8080/api/stats` | 性能统计 |
-| `http://localhost:8080/api/time` | 服务端时间 |
-| `http://localhost:8080/api/echo` | Echo（POST） |
-| `http://localhost:8080/session/info` | 会话信息 |
-| `http://localhost:8080/session/stats` | 会话统计 |
-| `http://localhost:8080/db/test` | 数据库连接测试 |
-| `http://localhost:8080/db/users` | 用户列表 |
-| `http://localhost:8080/db/add-user` | 添加用户表单 |
+### 性能基准
 
 ```bash
-# 压力测试
-wrk -t4 -c100 -d30s http://localhost:8080/
-
-# API 测试
-curl http://localhost:8080/api/status
+bash scripts/bench_http.sh          # HTTP 全量：并发梯度 + 每请求 CPU + 内存池交替 + 短连接（约 8 分钟）
+bash scripts/bench_http.sh quick    # HTTP 快速回归：100/1000 两档 + 内存池单轮（约 2 分钟）
 ```
+
+HTTP 脚本同样会先做装置自检（端口就绪且进程存活），失败则把整批标记作废。结果写入 `results/`。
+
+## 构建选项与配置
+
+| 选项 | 默认 | 说明 |
+|---|---|---|
+| `CMAKE_BUILD_TYPE` | 未指定 | 建议 `Release`；`-O2` 恒定生效，`Release` 另加 `-O3 -DNDEBUG`（引用性能数据须注明构建类型） |
+| `BUILD_EXAMPLES` | `ON` | 编译 `examples/` 下的示例与 `bench_server` |
+| `ENABLE_STRICT_WARNINGS` | `OFF` | 把部分警告提升为错误（`-Werror=return-type` / `-Werror=unused-result` / `-Werror=uninitialized` / `-Werror=delete-non-virtual-dtor`） |
+| `SANITIZE` | 空 | 传 `address` / `thread` / `undefined` 启用对应 sanitizer（需要手工跑，未进 CI） |
+
+运行时配置分两层：`http::App` 负责路由、会话（过期与清理间隔）、数据库与内存池开关；连接数上限、
+空闲超时、内存池块大小与块数等在 `HttpServer` 上设置，且**必须在 `start()` 之前**调用（运行期
+修改会被忽略并打印警告），`App` 未透出这些选项。模板目录来自编译期宏 `TEMPLATES_DIR`，不是运行期配置。
 
 ## API 参考
+
+> 下面是公开接口速查；**完整签名与默认值以 `include/` 下的头文件为准**，示例见 `examples/`。
 
 ### App
 
@@ -717,10 +780,11 @@ class HttpServer {
 public:
     HttpServer(int port, size_t threadPoolSize = hardware_concurrency,
                size_t subReactorCount = 0);     // 0 = hardware_concurrency
-    void start();
+    bool start();                                // false = 启动失败
     void stop();
     void setRouter(std::shared_ptr<router::Router> router);
-    void enableMemoryPool(bool enable = true);
+    void enableMemoryPool(bool enable = true,    // 须在 start() 之前调用
+                          size_t blockSizeBytes = 0, size_t poolBlocks = 0);  // 0 = 12KB × 5000
     bool isRunning() const;
 };
 ```

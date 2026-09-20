@@ -6,20 +6,18 @@
 #   . "$PROJECT_DIR/scripts/bench_env.sh"
 #
 # 本文件只有函数定义，没有副作用（source 进来不会执行任何命令）。
-# 由 run_http_bench.sh / run_wss_bench.sh / generate_report.sh / bench_all.sh 共用，
+# 由 run_http_bench.sh / generate_report.sh 共用，
 # 避免"每个脚本各写一份环境记录"导致结果文件口径不一致。
 #
 # 退出码约定（调用方保持一致）: 0=正常, 3=缺依赖跳过（不是失败）。
 
 # ── 结果目录映射 ──────────────────────────────────────────
 #
-# 分支名带 '/' 时不能直接拼进路径（feature/WebSocket → results/feature/WebSocket），
-# 所以用显式映射表。未知分支：打印警告后按 'results/<分支名，/→->' 使用，
-# 保证脚本能跑但不会悄悄写到别的目录。
+# 分支名带 '/' 时不能直接拼进路径，所以用显式映射表。未知分支：打印警告后按
+# 'results/<分支名，/→->' 使用，保证脚本能跑但不会悄悄写到别的目录。
 bench_result_dir() {
     case "${1:-}" in
         main)              printf '%s\n' "results/main" ;;
-        feature/WebSocket) printf '%s\n' "results/wss" ;;
         "")
             printf '[错误] bench_result_dir: 缺少分支名参数\n' >&2
             return 1 ;;

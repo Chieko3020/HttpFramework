@@ -8,9 +8,11 @@
 //   --middleware N     额外全局中间件层数 (默认 0)
 //   --session          启用 Session 中间件
 //   --template         启用 Template 端点 (测文件 I/O)
+#ifdef ENABLE_WSS
 //   --wss-port PORT    WSS 端口 (需 ENABLE_WSS, 默认 0=禁用)
 //   --cert FILE        TLS 证书路径 (默认 /tmp/bench_cert.pem)
 //   --key FILE         TLS 私钥路径 (默认 /tmp/bench_key.pem)
+#endif
 //   --help             显示帮助
 
 #include "HttpFramework.h"

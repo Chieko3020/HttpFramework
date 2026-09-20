@@ -1,5 +1,5 @@
 #!/bin/bash
-# generate_report.sh — 解析基准结果文件，生成双分支对比报告 (纯 Shell)
+# generate_report.sh — 解析基准结果文件，生成 HTTP 基准报告 (纯 Shell)
 # 用法: ./scripts/generate_report.sh [results_dir] [output_file]
 # 默认: 读取 results/ 目录，输出到 results/REPORT.md
 #
@@ -14,10 +14,9 @@ RESULTS_DIR="${1:-results}"
 OUT_FILE="${2:-$RESULTS_DIR/REPORT.md}"
 PROJECT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 
-# 公共函数：分支 → 结果目录映射（与 run_http_bench / run_wss_bench / bench_all 共用一份）
+# 公共函数：分支 → 结果目录映射（与 run_http_bench 共用一份）
 . "$PROJECT_DIR/scripts/bench_env.sh"
 MAIN_DIR="$RESULTS_DIR/$(basename "$(bench_result_dir main)")"
-WSS_DIR="$RESULTS_DIR/$(basename "$(bench_result_dir feature/WebSocket)")"
 
 # ── 通用提取函数 ──────────────────────────────────────────
 
@@ -66,7 +65,7 @@ socket_errors_after() {
         | sed 's/^[[:space:]]*Socket errors:[[:space:]]*//' || true
 }
 
-# 百分比差异：main → wss 的相对变化；缺数据输出"数据缺失"
+# 百分比差异：新值相对基准值的变化；缺数据输出"数据缺失"
 pct_diff() {
     awk -v b="${1:-}" -v n="${2:-}" 'BEGIN{
         if (b == "" || n == "" || b !~ /^[0-9.]+$/ || n !~ /^[0-9.]+$/ || b + 0 == 0) { print "数据缺失"; exit }
@@ -104,31 +103,13 @@ env_field() {
     [ -n "$v" ] && printf '%s\n' "$v" || printf '数据缺失\n'
 }
 
-# WSS C++ 客户端输出解析（新版汇总行 "延迟 p50: x ms"，旧版逐轮行 "延迟: avg=.. p50=.. p99=.."）
-wss_throughput() {
-    grep -oP '吞吐:\s*\K\d+' "$1" 2>/dev/null | tail -1 || true
-}
-wss_latency_avg() {
-    local v
-    v=$(grep -oP '延迟 avg:\s*\K[\d.]+' "$1" 2>/dev/null | tail -1 || true)
-    [ -n "$v" ] && printf '%s\n' "$v" || grep -oP '延迟:\s*avg=\K[\d.]+' "$1" 2>/dev/null | tail -1 || true
-}
-wss_latency_quantile() {  # $1=文件 $2=q50|q90|q99(新版) / 旧版只有 p50、p99
-    local f="$1" q="$2" label="${2#q}" v
-    v=$(grep -oP "延迟 p${label}:\s*\K[\d.]+" "$f" 2>/dev/null | tail -1 || true)
-    if [ -z "$v" ]; then
-        v=$(grep -oP "p${label}=\K[\d.]+" "$f" 2>/dev/null | tail -1 || true)
-    fi
-    printf '%s\n' "$v"
-}
-
 # ── 生成报告 ──────────────────────────────────────────────
 
 {
 echo "# HttpFramework 性能基准测试报告"
 echo ""
 echo "> 生成时间: $(date '+%Y-%m-%d %H:%M')"
-echo "> 分支 → 结果目录: main → ${MAIN_DIR}，feature/WebSocket → ${WSS_DIR}"
+echo "> 分支 → 结果目录: main → ${MAIN_DIR}"
 echo ""
 echo "## 环境锚定（逐项取自结果文件头，缺失即写\"数据缺失\"）"
 echo ""
@@ -150,13 +131,12 @@ echo ""
 # ── A1 ──
 echo "## A1: 纯文本吞吐量"
 echo ""
-echo "| 场景 | main (req/s) | WSS 分支 (req/s) | WSS vs main |"
-echo "|------|-------------|-----------------|-------------|"
+echo "| 场景 | req/s |"
+echo "|------|-------|"
 for item in "100 并发:a1_plaintext" "1000 并发:a1_plaintext_hc"; do
     label="${item%%:*}"; f="${item##*:}"
     m=$(rps "$MAIN_DIR/$f.txt")
-    w=$(rps "$WSS_DIR/$f.txt")
-    echo "| $label | ${m:-数据缺失} | ${w:-数据缺失} | $(pct_diff "$m" "$w") |"
+    echo "| $label | ${m:-数据缺失} |"
 done
 echo ""
 
@@ -164,67 +144,59 @@ echo ""
 echo "## A2: JSON 响应吞吐量"
 echo ""
 m=$(rps "$MAIN_DIR/a2_json.txt")
-w=$(rps "$WSS_DIR/a2_json.txt")
-echo "| 分支 | 吞吐量 |"
-echo "|------|--------|"
-echo "| main | ${m:-数据缺失} req/s |"
-echo "| WSS  | ${w:-数据缺失} req/s |"
+echo "| 场景 | req/s |"
+echo "|------|-------|"
+echo "| JSON 响应 | ${m:-数据缺失} |"
 echo ""
 
 # ── A3 ──
 echo "## A3: 延迟分布 (100 conn, JSON)"
 echo ""
-echo "| 分位 | main | WSS |"
-echo "|------|------|-----|"
-echo "| avg | $(present "$(latency_avg "$MAIN_DIR/a3_latency.txt")") | $(present "$(latency_avg "$WSS_DIR/a3_latency.txt")") |"
-echo "| p50 | $(present "$(latency_at 50 "$MAIN_DIR/a3_latency.txt")") | $(present "$(latency_at 50 "$WSS_DIR/a3_latency.txt")") |"
-echo "| p99 | $(present "$(latency_at 99 "$MAIN_DIR/a3_latency.txt")") | $(present "$(latency_at 99 "$WSS_DIR/a3_latency.txt")") |"
+echo "| 分位 | 延迟 |"
+echo "|------|------|"
+echo "| avg | $(present "$(latency_avg "$MAIN_DIR/a3_latency.txt")") |"
+echo "| p50 | $(present "$(latency_at 50 "$MAIN_DIR/a3_latency.txt")") |"
+echo "| p99 | $(present "$(latency_at 99 "$MAIN_DIR/a3_latency.txt")") |"
 echo ""
 
 # ── A4 ──
 echo "## A4: 最大并发连接"
 echo ""
-echo "| 并发数 | main (req/s) | WSS (req/s) | WSS vs main |"
-echo "|--------|-------------|-------------|-------------|"
+echo "| 并发数 | req/s |"
+echo "|--------|-------|"
 for conn in 100 500 1000 2000 5000; do
     mc=$(extract_rps "并发: $conn" "$MAIN_DIR/a4_maxconn.txt")
-    wc=$(extract_rps "并发: $conn" "$WSS_DIR/a4_maxconn.txt")
-    echo "| $conn | ${mc:-数据缺失} | ${wc:-数据缺失} | $(pct_diff "$mc" "$wc") |"
+    echo "| $conn | ${mc:-数据缺失} |"
 done
 echo ""
 echo "压测期 Socket errors（非 0 说明出现连接失败/读错误，不能只写\"稳定\"）："
 echo ""
-echo "- main @5000: $(socket_errors_after "$MAIN_DIR/a4_maxconn.txt" "并发: 5000")"
-echo "- WSS  @5000: $(socket_errors_after "$WSS_DIR/a4_maxconn.txt" "并发: 5000")"
+echo "- 5000 并发: $(present "$(socket_errors_after "$MAIN_DIR/a4_maxconn.txt" "并发: 5000")")"
 echo ""
 
 # ── A5 ──
 echo "## A5: 内存占用"
 echo ""
 mr=$(rss_peak "$MAIN_DIR/a5_memory.txt")
-wr=$(rss_peak "$WSS_DIR/a5_memory.txt")
-echo "| 分支 | 峰值 RSS |"
-echo "|------|---------|"
-echo "| main | ${mr:-数据缺失} |"
-echo "| WSS  | ${wr:-数据缺失} |"
+echo "| 指标 | 值 |"
+echo "|------|-----|"
+echo "| 峰值 RSS | ${mr:-数据缺失} |"
 echo ""
 
 # ── A6 ──
 echo "## A6: 每请求 CPU 成本"
 echo ""
-echo "- main: $(value_or_missing "$MAIN_DIR/a6_cpu_cost.txt" "每请求 CPU 时间")"
-echo "- WSS : $(value_or_missing "$WSS_DIR/a6_cpu_cost.txt" "每请求 CPU 时间")"
+echo "- 每请求 CPU 时间: $(value_or_missing "$MAIN_DIR/a6_cpu_cost.txt" "每请求 CPU 时间")"
 echo ""
 
 # ── B1 ──
 echo "## B1: 线程扩展性"
 echo ""
-echo "| 线程数 | main (req/s) | WSS (req/s) |"
-echo "|--------|-------------|-------------|"
+echo "| 线程数 | req/s |"
+echo "|--------|-------|"
 for t in 1 2 4 8 16; do
     mt=$(extract_rps "线程: $t" "$MAIN_DIR/b1_threads.txt")
-    wt=$(extract_rps "线程: $t" "$WSS_DIR/b1_threads.txt")
-    echo "| $t | ${mt:-数据缺失} | ${wt:-数据缺失} |"
+    echo "| $t | ${mt:-数据缺失} |"
 done
 echo ""
 
@@ -232,43 +204,38 @@ echo ""
 echo "## B2: 内存池收益"
 echo ""
 mo=$(rps "$MAIN_DIR/b2_mempool_off.txt")
-wo=$(rps "$WSS_DIR/b2_mempool_off.txt")
 mn=$(rps "$MAIN_DIR/b2_mempool_on.txt")
-wn=$(rps "$WSS_DIR/b2_mempool_on.txt")
-echo "| 配置 | main (req/s) | WSS (req/s) |"
-echo "|------|-------------|-------------|"
-echo "| OFF | ${mo:-数据缺失} | ${wo:-数据缺失} |"
-echo "| ON  | ${mn:-数据缺失} | ${wn:-数据缺失} |"
+echo "| 配置 | req/s |"
+echo "|------|-------|"
+echo "| OFF | ${mo:-数据缺失} |"
+echo "| ON  | ${mn:-数据缺失} |"
 echo ""
-echo "- main 内存池收益: $(anchored_pct "$MAIN_DIR/b2_mempool_off.txt" "$MAIN_DIR/b2_mempool_on.txt" "$mo" "$mn")"
-echo "- WSS  内存池收益: $(anchored_pct "$WSS_DIR/b2_mempool_off.txt" "$WSS_DIR/b2_mempool_on.txt" "$wo" "$wn")"
+echo "- 内存池收益: $(anchored_pct "$MAIN_DIR/b2_mempool_off.txt" "$MAIN_DIR/b2_mempool_on.txt" "$mo" "$mn")"
 echo ""
 echo "> 口径：本段只在两侧结果文件都带 环境-git-HEAD 且 HEAD 一致时才给百分比。"
 echo "> 早期入库的 b2 结果（无 环境-* 行）不足以下收益结论 —— 需要时请重跑"
-echo "> scripts/run_bench.sh 的 B2 段落后再看这一节。"
+echo "> scripts/run_http_bench.sh 的 B2 段落后再看这一节。"
 echo ""
 
 # ── B3 ──
 echo "## B3: 路由扩展性"
 echo ""
-echo "| 路由数 | main (req/s) | WSS (req/s) |"
-echo "|--------|-------------|-------------|"
+echo "| 路由数 | req/s |"
+echo "|--------|-------|"
 for n in 10 100 500 1000; do
     mr=$(extract_rps "路由数: $n" "$MAIN_DIR/b3_routes.txt")
-    wr=$(extract_rps "路由数: $n" "$WSS_DIR/b3_routes.txt")
-    echo "| $n | ${mr:-数据缺失} | ${wr:-数据缺失} |"
+    echo "| $n | ${mr:-数据缺失} |"
 done
 echo ""
 
 # ── C1 ──
 echo "## C1: 中间件开销"
 echo ""
-echo "| 层数 | main (req/s) | WSS (req/s) |"
-echo "|------|-------------|-------------|"
+echo "| 层数 | req/s |"
+echo "|------|-------|"
 for m in 0 1 5 10; do
     mm=$(extract_rps "中间件层数: $m" "$MAIN_DIR/c1_middleware.txt")
-    wm=$(extract_rps "中间件层数: $m" "$WSS_DIR/c1_middleware.txt")
-    echo "| $m | ${mm:-数据缺失} | ${wm:-数据缺失} |"
+    echo "| $m | ${mm:-数据缺失} |"
 done
 echo ""
 
@@ -276,86 +243,11 @@ echo ""
 echo "## C2: 会话开销"
 echo ""
 mo=$(rps "$MAIN_DIR/c2_session_off.txt")
-wo=$(rps "$WSS_DIR/c2_session_off.txt")
 mn=$(rps "$MAIN_DIR/c2_session_on.txt")
-wn=$(rps "$WSS_DIR/c2_session_on.txt")
-echo "| 配置 | main (req/s) | WSS (req/s) |"
-echo "|------|-------------|-------------|"
-echo "| OFF | ${mo:-数据缺失} | ${wo:-数据缺失} |"
-echo "| ON  | ${mn:-数据缺失} | ${wn:-数据缺失} |"
-echo ""
-
-# ── WSS 专属 ──
-echo "## D1: WSS 消息吞吐量"
-echo ""
-echo "| 消息大小 | 吞吐量 (msg/s) | 延迟 avg | 延迟 p50 | 延迟 p99 |"
-echo "|---------|---------------|---------|---------|---------|"
-for size in 256B 1KB 16KB; do
-    f="$WSS_DIR/d1_throughput_${size}.txt"
-    if [ -f "$f" ]; then
-        tp=$(wss_throughput "$f")
-        la=$(wss_latency_avg "$f")
-        lp50=$(wss_latency_quantile "$f" q50)
-        lp99=$(wss_latency_quantile "$f" q99)
-        echo "| $size | ${tp:-数据缺失} | ${la:-数据缺失}ms | ${lp50:-数据缺失}ms | ${lp99:-数据缺失}ms |"
-    else
-        echo "| $size | 数据缺失 | 数据缺失 | 数据缺失 | 数据缺失 |"
-    fi
-done
-echo ""
-echo "> WSS 分位口径：nearest-rank idx=ceil(q*n)-1，中位数用标准定义；样本量与预热见各结果文件头。"
-echo ""
-
-echo "## D2: TLS 握手速率"
-echo ""
-f="$WSS_DIR/d2_handshake.txt"
-if [ -f "$f" ]; then
-    echo "- 原始记录: $(grep -m1 '^成功' "$f" 2>/dev/null || echo 数据缺失)"
-    echo "- 握手/秒: $(value_or_missing "$f" "握手/秒")"
-    echo "- 判据: $(value_or_missing "$f" "判据")"
-else
-    echo "- 数据缺失（$f 不存在）"
-fi
-echo ""
-
-echo "## D3: 并发 WSS 连接"
-echo ""
-f="$WSS_DIR/d3_maxconn.txt"
-if [ -f "$f" ]; then
-    echo "- 尝试连接数: $(value_or_missing "$f" "尝试连接数")"
-    echo "- 成功建立: $(value_or_missing "$f" "成功建立")"
-    echo "- 失败/未能判定: $(value_or_missing "$f" "未能判定")"
-    echo "- 判据: $(value_or_missing "$f" "判据")"
-else
-    echo "- 数据缺失（$f 不存在）"
-fi
-echo ""
-
-echo "## D4: HTTP+WSS 共存"
-echo ""
-f="$WSS_DIR/d4_coexist.txt"
-if [ -f "$f" ]; then
-    coexist=$(grep "Requests/sec" "$f" 2>/dev/null | awk '{print $2}' | head -1 || true)
-    echo "- 共存期 HTTP 吞吐: ${coexist:-数据缺失} req/s"
-    echo "- 与 A1(1000 并发) 的差异: $(pct_diff "$(rps "$MAIN_DIR/a1_plaintext_hc.txt")" "$coexist")"
-    echo "- 误差范围: 单机环回下 wrk 自身波动会混入该差异，是否归因于 WSS 需看重复测量的一致性（本报告不做此断言）"
-else
-    echo "- 数据缺失（$f 不存在）"
-fi
-echo ""
-
-echo "## D5: 文件传输"
-echo ""
-f="$WSS_DIR/d5_filetransfer_256kb.txt"
-if [ -f "$f" ]; then
-    if grep -q "状态: 跳过" "$f" 2>/dev/null; then
-        echo "- 跳过: $(value_or_missing "$f" "原因")"
-    else
-        echo "- 256KB 吞吐量: $(value_or_missing "$f" "吞吐量")"
-    fi
-else
-    echo "- 数据缺失（$f 不存在）"
-fi
+echo "| 配置 | req/s |"
+echo "|------|-------|"
+echo "| OFF | ${mo:-数据缺失} |"
+echo "| ON  | ${mn:-数据缺失} |"
 echo ""
 
 # ── 结论 ──
@@ -364,21 +256,14 @@ echo ""
 echo "| 指标 | 数值 |"
 echo "|------|------|"
 mhc=$(rps "$MAIN_DIR/a1_plaintext_hc.txt")
-whc=$(rps "$WSS_DIR/a1_plaintext_hc.txt")
-echo "| HTTP 纯文本吞吐 (1000 conn) | main ${mhc:-数据缺失} / WSS ${whc:-数据缺失} req/s |"
-echo "| WSS 消息吞吐 (256B) | $(present "$(wss_throughput "$WSS_DIR/d1_throughput_256B.txt")") msg/s |"
-echo "| HTTP p50 延迟 (main) | $(present "$(latency_at 50 "$MAIN_DIR/a3_latency.txt")") |"
-echo "| WSS p50 延迟 (256B) | $(present "$(wss_latency_quantile "$WSS_DIR/d1_throughput_256B.txt" q50)") ms |"
+echo "| HTTP 纯文本吞吐 (1000 conn) | ${mhc:-数据缺失} req/s |"
+echo "| HTTP p50 延迟 (100 conn) | $(present "$(latency_at 50 "$MAIN_DIR/a3_latency.txt")") |"
 mo=$(rps "$MAIN_DIR/b2_mempool_off.txt"); mn=$(rps "$MAIN_DIR/b2_mempool_on.txt")
-wo=$(rps "$WSS_DIR/b2_mempool_off.txt"); wn=$(rps "$WSS_DIR/b2_mempool_on.txt")
-echo "| 内存池加速 (main) | $(anchored_pct "$MAIN_DIR/b2_mempool_off.txt" "$MAIN_DIR/b2_mempool_on.txt" "$mo" "$mn")（off ${mo:-数据缺失} → on ${mn:-数据缺失} req/s） |"
-echo "| 内存池加速 (WSS) | $(anchored_pct "$WSS_DIR/b2_mempool_off.txt" "$WSS_DIR/b2_mempool_on.txt" "$wo" "$wn")（off ${wo:-数据缺失} → on ${wn:-数据缺失} req/s） |"
-echo "| WSS vs main (1000 conn 纯文本) | $(pct_diff "$mhc" "$whc") |"
-echo "| 5000 并发 (main) | $(present "$(extract_rps "并发: 5000" "$MAIN_DIR/a4_maxconn.txt")") req/s；Socket errors: $(present "$(socket_errors_after "$MAIN_DIR/a4_maxconn.txt" "并发: 5000")") |"
-echo "| WSS 并发升级 (D3) | $(value_or_missing "$WSS_DIR/d3_maxconn.txt" "成功建立") 成功 / $(value_or_missing "$WSS_DIR/d3_maxconn.txt" "未能判定") |"
+echo "| 内存池加速 | $(anchored_pct "$MAIN_DIR/b2_mempool_off.txt" "$MAIN_DIR/b2_mempool_on.txt" "$mo" "$mn")（off ${mo:-数据缺失} → on ${mn:-数据缺失} req/s） |"
+echo "| 5000 并发 | $(present "$(extract_rps "并发: 5000" "$MAIN_DIR/a4_maxconn.txt")") req/s；Socket errors: $(present "$(socket_errors_after "$MAIN_DIR/a4_maxconn.txt" "并发: 5000")") |"
 echo ""
 echo "> 本报告不输出\"稳定无崩溃\"\"影响 <2%\"这类无法从结果文件核验的结论；"
-echo "> 需要这类判断时，请以 A4 的 Socket errors 行、D3 的成功/失败计数和重复测量的一致性为依据。"
+echo "> 需要这类判断时，请以 A4 的 Socket errors 行和重复测量的一致性为依据。"
 echo ""
 
 }> "$OUT_FILE"

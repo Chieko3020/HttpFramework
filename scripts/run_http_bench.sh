@@ -8,7 +8,7 @@ set -euo pipefail
 BRANCH="${1:-unknown}"
 PROJECT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 
-# 公共函数：结果目录映射 + 结果文件环境锚定（与 run_wss_bench / bench_all 共用一份）
+# 公共函数：结果目录映射 + 结果文件环境锚定（与 generate_report.sh 共用一份）
 . "$PROJECT_DIR/scripts/bench_env.sh"
 
 RESULT_DIR="${2:-$(bench_result_dir "$BRANCH")}"

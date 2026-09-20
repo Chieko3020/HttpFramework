@@ -3,7 +3,12 @@ build/
 Build/
 BUILD/
 cmake-build-*/
-results/
+# 基准结果：目录整体忽略，但已入库的数据与标准化脚本产出除外
+# （bench_http.sh 写出 results/http_bench_<时间戳>.txt，需可入库才能作为文档数字的出处）
+results/*
+!results/main/
+!results/REPORT.md
+!results/http_bench_*.txt
 # CMake generated files
 CMakeCache.txt
 CMakeFiles/
@@ -108,5 +113,4 @@ config.ini
 *.zip
 *.app
 TODO
-build-wss/
 build-*/
