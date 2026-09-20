@@ -7,7 +7,7 @@ HttpFramework 是一个 C++17 的 HTTP 服务框架，可选启用 WebSocket + T
 路由匹配、链式中间件、会话管理，以及基于线程池的异步处理模型。网络层由本项目实现，
 不引入第三方网络库；接入方式是一个 CMake 目标，可以被 `find_package(HttpFramework)` 引入。
 
-规模约 9500 行（`src/` + `include/`）；测试默认构建 12 个 ctest 目标，启用 WSS 后 15 个。
+规模约 9500 行（`src/` + `include/`）；测试默认构建 13 个 ctest 目标，启用 WSS 后 16 个（另：`ctest -LE requires-db` 口径下为 12/15，因 `test_http_db` 在无数据库时只跑 1 个用例）。
 
 ## 快速开始
 
@@ -226,7 +226,7 @@ WSS 路径:   1 个 WssReactor（独立 epoll 线程）┘
 **0-RTT 的取舍。** TLS 1.3 的 0-RTT 能省一个 RTT，但有重放风险。OpenSSL 内置的
 anti-replay 要求服务端缓存票据，多实例部署下不可用；但**本项目仍然保留它**
 （0-RTT 开启时不做 `SSL_OP_NO_ANTI_REPLAY`，启动日志打 `anti_replay=ON`，见
-`src/wss/OpenSslHelpers.cpp:79-86`）：因为应用层的 `X-Nonce` 判重只在连接**真的接受了
+`src/wss/OpenSslHelpers.cpp:79-89`）：因为应用层的 `X-Nonce` 判重只在连接**真的接受了
 early data** 时才强制（判据是 `SSL_get_early_data_status() == SSL_EARLY_DATA_ACCEPTED`，
 见 `include/HttpFramework/wss/WebSocketCodec.h:71-77`），关掉库内防护会让默认路径失去
 任何反重放能力。默认配置不开 0-RTT。
@@ -431,11 +431,11 @@ early data 时**才强制（`WebSocketCodec.h:71-77`）。早期版本用环境�
 ```bash
 # 默认配置（仅 HTTP）
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release && cmake --build build -j
-cd build && ctest --output-on-failure          # 12/12
+cd build && ctest --output-on-failure          # 13/13
 
 # 启用 WSS 扩展
 cmake -S . -B build-wss -DCMAKE_BUILD_TYPE=Release -DENABLE_WSS=ON
-cmake --build build-wss -j && cd build-wss && ctest --output-on-failure   # 15/15
+cmake --build build-wss -j && cd build-wss && ctest --output-on-failure   # 16/16
 ```
 
 | 测试文件 | 覆盖内容 | 用例数 |
@@ -450,6 +450,7 @@ cmake --build build-wss -j && cd build-wss && ctest --output-on-failure   # 15/1
 | `test_http_template` | 模板：加载/变量替换/fallback | 5 |
 | `test_http_db` | 数据库连接池：初始化/获取/查询/计数/TCP 探测（无库时 1 通过 + 5 跳过） | 6 |
 | `test_edge_input` | 异常输入：Header 过大/路径穿越/畸形请求 | 7 |
+| `test_edge_cert` | 证书异常：有效证书/文件不存在/证书与私钥不匹配/对照组（需 WSS） | 5 |
 | `test_edge_stress` | 并发压力：1000 请求/统计/重启/fd 泄露 | 4 |
 | `test_http_hardening` | 加固回归：信号/管线化/框架头/慢速滴灌/畸形请求 | 20 |
 | `test_http_keepalive` | 长连接：复用/管线化/空闲回收 | 5 |
