@@ -224,9 +224,12 @@ WSS 路径:   1 个 WssReactor（独立 epoll 线程）┘
 **只能说"无可观测收益"**，所以默认关闭（另外它会预分配约 20 MB）。
 
 **0-RTT 的取舍。** TLS 1.3 的 0-RTT 能省一个 RTT，但有重放风险。OpenSSL 内置的
-anti-replay 要求服务端缓存票据，多实例部署下不可用，所以本项目显式关掉它，改在应用层
-用请求头里的 `X-Nonce` + 带 TTL 的 seen 表判重。**这意味着安全责任从库移到了应用**：
-nonce 校验必须是必选项，且默认配置不开 0-RTT。
+anti-replay 要求服务端缓存票据，多实例部署下不可用；但**本项目仍然保留它**
+（0-RTT 开启时不做 `SSL_OP_NO_ANTI_REPLAY`，启动日志打 `anti_replay=ON`，见
+`src/wss/OpenSslHelpers.cpp:79-86`）：因为应用层的 `X-Nonce` 判重只在连接**真的接受了
+early data** 时才强制（判据是 `SSL_get_early_data_status() == SSL_EARLY_DATA_ACCEPTED`，
+见 `include/HttpFramework/wss/WebSocketCodec.h:71-77`），关掉库内防护会让默认路径失去
+任何反重放能力。默认配置不开 0-RTT。
 
 **TLS 记录边界不等于 WebSocket 帧边界。** 一次 `SSL_read` 可能只返回半个帧、也可能一次
 带回多个帧；而升级请求和头几批数据还可能挤在同一个 TLS 记录里。所以解析器必须是**可重入
@@ -266,14 +269,16 @@ nonce 校验必须是必选项，且默认配置不开 0-RTT。
 **顺带**：正因为回写带了 `ConnId`，这里必须做归属校验（见 ⑤），否则队列里躺着的旧连接
 回调会打到已经复用同一 fd 的新连接上。
 
-### ③ 0-RTT 重放防护：把责任从库移到应用
+### ③ 0-RTT 重放防护：库内防护保留 + 应用层判重
 
 **难在哪**：0-RTT 的吸引力是省一个 RTT（对短连接场景可观），但允许重放。OpenSSL 的
 anti-replay 依赖服务端缓存 session ticket——单机可用，**多实例部署直接失效**。
 
-**取舍**：显式关闭 OpenSSL 的 anti-replay，改在应用层判重（`X-Nonce` + TTL seen 表），
-并**默认不开 0-RTT**。这个取舍是明确的：安全责任从库移到了应用，所以 nonce 校验必须
-是必选项而不是可选装饰。
+**取舍（注意与早期版本相反）**：**保留** OpenSSL 的 anti-replay（`OpenSslHelpers.cpp:79-86`），
+而不是关掉它；同时在应用层加 `X-Nonce` + TTL seen 表判重，且该判重**只在连接真的接受了
+early data 时**才强制（`WebSocketCodec.h:71-77`）。早期版本用环境变量
+`HTTPFW_WSS_ENABLE_0RTT` 控制 nonce 强制，与 TLS 侧的 0-RTT 开关脱耦，会在非 0-RTT
+连接上拒绝正常的升级请求（H9），该环境变量现已无任何作用点。**默认不开 0-RTT。**
 
 **如实交代的边界**：目前只有"H9：设了环境变量也不影响非 0-RTT 连接升级"这一条用例，
 **缺少 early data + `X-Nonce` 判重的端到端验证**（记在 TODO 的 I5）。
