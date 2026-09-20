@@ -229,9 +229,7 @@ cmake --build build
 
 ### 构建选项
 
-| 选项 | 默认值 | 说明 |
-|------|--------|------|
-| `BUILD_EXAMPLES` | ON | 编译示例程序 |
+构建选项的完整列表见后文"构建选项与配置"；最常用的一项是关掉示例编译：
 
 ```bash
 # 仅构建库，不编译示例
@@ -352,15 +350,16 @@ cmake --build build
                               │ 写响应：把 PendingResponse 投递到目标连接的 pendingResponses
                               │ 然后 write(eventfd) 唤醒**属于该连接**的子 Reactor
                               ▼
-                  子 Reactor 线程：从队列取出 → EPOLL_CTL_MOD 重新注册 → send
+                  子 Reactor 线程：从队列取出 → send → 完整写出后再 EPOLL_CTL_MOD 重新注册
 ```
 
-**为什么不让工作线程直接 send / 改 epoll**：子 Reactor 的 epoll 实例是被它自己的线程独占的，
-工作线程去 `EPOLL_CTL_MOD` 相当于两个线程并发操作同一个 epoll；而且连接注册的是 `EPOLLONESHOT`，
-从别的线程改状态会打乱"一次事件一次处理"的语义，可能造成重复投递或丢失事件。
-所以回写动作经 `eventfd` 唤醒后**收敛回子 Reactor 线程**执行。
+**为什么不让工作线程直接 send / 改 epoll**：回写动作经 `eventfd` 唤醒后
+**收敛回子 Reactor 线程**执行；理由见"关键设计与取舍"。
 
 ### 请求生命周期
+
+一个请求从进入到响应写出的完整路径；入口的 accept 与 round-robin 分发见上面的"线程模型"，
+参与者即线程归属：
 
 ```mermaid
 sequenceDiagram
@@ -375,8 +374,8 @@ sequenceDiagram
     TP->>H: 中间件链 → 路由匹配 → handler
     H->>H: 生成响应（序列化）
     H->>SR: pendingResponses.push_back({connId, data, keepAlive}) + write(eventfd)
-    SR->>SR: EPOLL_CTL_MOD 重新注册 EPOLLIN|ONESHOT
     SR->>C: send 响应
+    SR->>SR: 完整写出后释放响应区、重置上下文，EPOLL_CTL_MOD 重新武装 EPOLLIN|ONESHOT
     Note over SR,C: keep-alive 则继续等待下一个请求；空闲超时回收连接
 ```
 
@@ -390,15 +389,7 @@ sequenceDiagram
 
 ## 工作原理
 
-### 请求处理流程
-
-```
-客户端连接 → main Reactor accept → round-robin 分发给 sub Reactor
-     ↓
-sub Reactor epoll 监听 → 非阻塞读取 → HTTP 解析 → 提交线程池
-     ↓
-业务处理 → 路由匹配 → 中间件链 → 响应构建 → 数据发送 → 资源清理
-```
+请求从进入到写出的整体路径见"架构"一节的"请求生命周期"；下面按环节展开实现。
 
 ### Reactor 事件循环
 
@@ -611,7 +602,8 @@ void SessionManager::cleanupExpiredSessions() {
 
 **回写为什么走 eventfd。** 子 Reactor 的 epoll 实例被它自己的线程独占，工作线程直接
 `EPOLL_CTL_MOD` 等于两个线程并发操作同一个 epoll；再加上连接注册的是 `EPOLLONESHOT`，
-跨线程改状态会打乱"一次事件一次处理"的语义。用 `eventfd` 把回写收敛回 Reactor 线程，
+跨线程改状态相当于把 oneshot 的监听状态重置，会打乱"一次事件一次处理"的语义，
+可能造成重复投递或丢失事件。用 `eventfd` 把回写收敛回 Reactor 线程，
 代价是每次响应多一次跨线程唤醒（实测这个开销远小于并发操作 epoll 的风险）。
 
 **为什么做固定块内存池，以及为什么默认关闭。** 动机是"高频分配"——早期是短连接形态，
@@ -634,8 +626,7 @@ void SessionManager::cleanupExpiredSessions() {
 ### ① 跨线程回写：工作线程不能碰别人的 epoll
 
 **难在哪**：连接注册的是 `EPOLLONESHOT`，事件被消费后必须由**同一个** Reactor 线程重新注册。
-第一版让工作线程直接对子 Reactor 的 epoll 做 `EPOLL_CTL_MOD`，问题有两个：
-① 两个线程并发操作同一个 epoll 实例；② oneshot 状态下 MOD 会重置状态，可能重复投递或丢事件。
+第一版让工作线程直接对子 Reactor 的 epoll 做 `EPOLL_CTL_MOD`（两个原因见"关键设计与取舍"）。
 
 **怎么做的**：每个子 Reactor 一个 `eventfd` + 一个 `pendingResponses` 列表。工作线程只做两件事：
 把 `{ConnId, 响应字节, keepAlive}` 投递进列表、`write(eventfd)`。响应内容随投递一起交付，
@@ -651,9 +642,9 @@ void SessionManager::cleanupExpiredSessions() {
 当时的修法是响应侧超限回退 `std::string`、请求侧比对实际写入字节数并回 413（带 `{"limit":...}`）；
 后续（H5）连这条路径也一并去掉——响应方向改用 `std::string`，不再从池里取块（见"核心组件"的 `HttpContext`）。
 
-**问题二：它其实没有收益。** 长连接改造之后池的调用频率降到每千请求约 1 次
-（500 并发 30 秒累计 1,008,350 请求，`allocate/deallocate` 只增加 1,002 次），
-三轮交替复测方向翻转。**结论是默认关闭**——理由是无收益 + 多占约 20 MB（RSS 口径），而不是"性能更差"。
+**问题二：它其实没有收益。** 长连接改造之后池的调用频率降到每千请求约 1 次，三轮交替复测方向翻转
+（调用次数、三轮吞吐与常驻增量见"实测性能"的"内存池：无可观测收益"）。
+**结论是默认关闭**——理由是无收益加内存占用，而不是"性能更差"。
 
 ### ③ 连接生命周期与 fd 归属：陈旧回调误杀新连接
 
@@ -706,7 +697,7 @@ HttpFramework/
 ## 实测性能
 
 > 环境：2 vCPU / 1968 MB 的 VPS（**压测端与被测服务同机 loopback**），服务线程池 4，`wrk 4.2.0`（`-t4`）
-> 测量脚本：`scripts/bench_http.sh`（HTTP）——该脚本启动服务后会等端口就绪并确认进程存活，结果落盘 `results/`
+> 测量脚本：`scripts/bench_http.sh`（HTTP），结果落盘 `results/`
 > 下表是 2026-09-20 用该脚本重跑的一批，原始输出为 `results/http_bench_20260920_0639.txt`。与更早批次相比，每请求 CPU 与短连接吞吐有差异（机器状态不同）
 
 ### 并发梯度（长连接）
@@ -800,12 +791,29 @@ session 过期与清理、中间件鉴权短路 401、`shutdown` 后 `enqueue` �
 
 ### 性能基准
 
+仓库里有三套互补的脚本，产出都落在 `results/`：
+
+| 脚本 | 用途 | 产出 |
+|---|---|---|
+| `scripts/bench_http.sh` | 标准化单次测量：并发梯度、每请求 CPU、内存池交替、短连接 | `results/http_bench_<时间戳>.txt`（单文件） |
+| `scripts/run_http_bench.sh <label> [dir]` | 分项全指标：A1–A6（吞吐 / JSON / 延迟分布 / 最大并发 / 内存 / CPU 成本）、B1–B3（线程 / 内存池 / 路由）、C1–C2（中间件 / 会话），每项独立启动服务 | `results/<label>/` 下每指标一个文件（共 14 个） |
+| `scripts/generate_report.sh` | 把分项文件汇总成报告（缺数据的项写"数据缺失"，只对已锚定的文件算百分比） | `results/REPORT.md` |
+
 ```bash
-bash scripts/bench_http.sh          # HTTP 全量：并发梯度 + 每请求 CPU + 内存池交替 + 短连接（约 8 分钟）
-bash scripts/bench_http.sh quick    # HTTP 快速回归：100/1000 两档 + 内存池单轮（约 2 分钟）
+# 标准化单次测量（对外引用数字时用它，带装置自检）
+bash scripts/bench_http.sh          # 全量：并发梯度 + 每请求 CPU + 内存池交替 + 短连接（约 8 分钟）
+bash scripts/bench_http.sh quick    # 快速回归：100/1000 两档 + 内存池单轮（约 2 分钟）
+
+# 分项全指标（逐项对照、出报告）
+bash scripts/run_http_bench.sh main results/main   # 本机约 10 分钟
+bash scripts/generate_report.sh                    # 汇总为 results/REPORT.md
 ```
 
-HTTP 脚本同样会先做装置自检（端口就绪且进程存活），失败则把整批标记作废。结果写入 `results/`。
+两个测量脚本都会先做装置自检（端口就绪且进程存活），不通过则把整批标记作废。
+
+**引用基准数字时必须带上工具与参数**：`bench_http.sh` 用 `wrk -t4`、并发 100–5000；
+`run_http_bench.sh` 用 `wrk -t2`（避免压测端与被测服务抢 CPU），各档时长 15/30 秒混合。
+两者口径不同，同一台机器上的绝对值也不可直接互相比较。
 
 ## 构建选项与配置
 

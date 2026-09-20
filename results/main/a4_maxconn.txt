@@ -1,54 +1,57 @@
 === a4_maxconn: 逐步提高并发找上限 ===
 分支: main
-时间: 2026-05-30T16:09:22+08:00
+时间: 2026-09-20T09:17:48+08:00
+环境: 2 vCPU / 1968 MB / Linux 6.8.0-90-generic
+环境-CPU: Intel(R) Xeon(R) Gold 6148 CPU @ 2.40GHz × 2
+环境-gcc: g++ (Ubuntu 13.3.0-6ubuntu2~24.04) 13.3.0
+环境-git-HEAD: 15289e28f39950f70810bf1003af3647d1599231
+环境-wrk: wrk 4.2.0 [epoll] Copyright (C) 2012 Will Glozer
+环境-governor: 不可读（固定失败：sysfs 无 cpufreq 驱动（虚拟机/容器常见）；已尝试 cpupower frequency-set -g performance，无效）
+环境-记录时间: 2026-09-20T09:17:49+08:00
+说明: 压测端与被测服务同机（环回），服务线程数见各项 --threads，wrk 线程数 -t2
 ---
   --- 并发: 100 ---
 Running 15s test @ http://localhost:18980/bench/plaintext
-  4 threads and 100 connections
+  2 threads and 100 connections
   Thread Stats   Avg      Stdev     Max   +/- Stdev
-    Latency     2.66ms    2.34ms  19.52ms   74.60%
-    Req/Sec    10.30k   732.59    20.53k    92.52%
-  616978 requests in 15.10s, 92.38MB read
-  Socket errors: connect 0, read 617180, write 0, timeout 0
-Requests/sec:  40859.97
-Transfer/sec:      6.12MB
+    Latency     2.82ms    0.99ms  13.12ms   73.77%
+    Req/Sec    17.35k     1.70k   23.53k    78.67%
+  518090 requests in 15.01s, 89.43MB read
+Requests/sec:  34505.51
+Transfer/sec:      5.96MB
   --- 并发: 500 ---
 Running 15s test @ http://localhost:18980/bench/plaintext
-  4 threads and 500 connections
+  2 threads and 500 connections
   Thread Stats   Avg      Stdev     Max   +/- Stdev
-    Latency    88.51ms  288.97ms   1.82s    93.35%
-    Req/Sec    10.07k     0.94k   11.32k    94.87%
-  605931 requests in 16.81s, 90.72MB read
-  Socket errors: connect 0, read 605992, write 0, timeout 0
-Requests/sec:  36038.49
-Transfer/sec:      5.40MB
+    Latency    14.26ms    4.06ms  45.54ms   71.14%
+    Req/Sec    17.11k     2.25k   30.00k    74.00%
+  512812 requests in 15.09s, 88.52MB read
+Requests/sec:  33982.98
+Transfer/sec:      5.87MB
   --- 并发: 1000 ---
 Running 15s test @ http://localhost:18980/bench/plaintext
-  4 threads and 1000 connections
+  2 threads and 1000 connections
   Thread Stats   Avg      Stdev     Max   +/- Stdev
-    Latency    27.94ms   23.85ms 152.92ms   71.74%
-    Req/Sec    10.19k   678.97    11.39k    89.17%
-  608385 requests in 15.05s, 91.09MB read
-  Socket errors: connect 0, read 608415, write 0, timeout 0
-Requests/sec:  40420.62
-Transfer/sec:      6.05MB
+    Latency    28.16ms    7.12ms  78.40ms   72.20%
+    Req/Sec    17.42k     2.27k   22.52k    64.77%
+  519092 requests in 15.01s, 89.60MB read
+Requests/sec:  34586.53
+Transfer/sec:      5.97MB
   --- 并发: 2000 ---
 Running 15s test @ http://localhost:18980/bench/plaintext
-  4 threads and 2000 connections
+  2 threads and 2000 connections
   Thread Stats   Avg      Stdev     Max   +/- Stdev
-    Latency   142.47ms  321.10ms   2.05s    93.22%
-    Req/Sec     9.85k     1.03k   11.39k    93.50%
-  589508 requests in 16.90s, 88.27MB read
-  Socket errors: connect 0, read 589539, write 0, timeout 0
-Requests/sec:  34885.71
-Transfer/sec:      5.22MB
+    Latency    62.45ms   14.15ms 125.43ms   72.93%
+    Req/Sec    15.71k     2.56k   23.18k    67.00%
+  468007 requests in 15.07s, 80.79MB read
+Requests/sec:  31051.47
+Transfer/sec:      5.36MB
   --- 并发: 5000 ---
 Running 15s test @ http://localhost:18980/bench/plaintext
-  4 threads and 5000 connections
+  2 threads and 5000 connections
   Thread Stats   Avg      Stdev     Max   +/- Stdev
-    Latency   133.82ms   97.58ms 531.03ms   67.90%
-    Req/Sec     9.91k     0.92k   13.93k    91.95%
-  587711 requests in 15.09s, 88.00MB read
-  Socket errors: connect 0, read 587708, write 0, timeout 0
-Requests/sec:  38955.41
-Transfer/sec:      5.83MB
+    Latency   168.38ms   26.08ms 283.35ms   72.77%
+    Req/Sec    14.47k     2.64k   23.28k    69.90%
+  427924 requests in 15.05s, 73.87MB read
+Requests/sec:  28430.23
+Transfer/sec:      4.91MB

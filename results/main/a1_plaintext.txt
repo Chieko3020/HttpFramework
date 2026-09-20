@@ -1,13 +1,20 @@
 === a1_plaintext: 纯文本吞吐量 - 2 连接 ===
 分支: main
-时间: 2026-05-30T16:06:58+08:00
+时间: 2026-09-20T09:15:44+08:00
+环境: 2 vCPU / 1968 MB / Linux 6.8.0-90-generic
+环境-CPU: Intel(R) Xeon(R) Gold 6148 CPU @ 2.40GHz × 2
+环境-gcc: g++ (Ubuntu 13.3.0-6ubuntu2~24.04) 13.3.0
+环境-git-HEAD: 15289e28f39950f70810bf1003af3647d1599231
+环境-wrk: wrk 4.2.0 [epoll] Copyright (C) 2012 Will Glozer
+环境-governor: 不可读（固定失败：sysfs 无 cpufreq 驱动（虚拟机/容器常见）；已尝试 cpupower frequency-set -g performance，无效）
+环境-记录时间: 2026-09-20T09:15:44+08:00
+说明: 压测端与被测服务同机（环回），服务线程数见各项 --threads，wrk 线程数 -t2
 ---
 Running 30s test @ http://localhost:18980/bench/plaintext
   2 threads and 100 connections
   Thread Stats   Avg      Stdev     Max   +/- Stdev
-    Latency    41.05ms  208.10ms   1.76s    96.26%
-    Req/Sec    18.19k     1.48k   21.56k    82.39%
-  1092159 requests in 31.83s, 163.53MB read
-  Socket errors: connect 0, read 1092491, write 0, timeout 0
-Requests/sec:  34314.58
-Transfer/sec:      5.14MB
+    Latency     2.70ms    1.32ms  28.68ms   81.35%
+    Req/Sec    18.26k     2.69k   24.97k    75.83%
+  1091294 requests in 30.03s, 188.37MB read
+Requests/sec:  36339.84
+Transfer/sec:      6.27MB
