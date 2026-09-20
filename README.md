@@ -573,30 +573,28 @@ HttpFramework/
 
 ### 单元测试
 
-项目包含完整的单元测试套件（11 项，77 个测试用例），覆盖全部核心模块：
+项目包含完整的单元测试套件（13 项，115 个测试用例），覆盖全部核心模块：
 
 ```bash
-# 编译并运行所有测试
-cmake -S . -B build && cmake --build build -j 2
-for t in build/tests/test_*; do $t; done
-
-# 或使用 CMake 自定义目标
-cmake --build build --target run_tests
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release && cmake --build build -j
+cd build && ctest --output-on-failure          # 13/13
 ```
 
 | 测试文件 | 模块 | 用例数 |
 |----------|------|--------|
-| `test_infra_threadpool` | 线程池：入队/批量/队列/关闭/状态 | 7 |
+| `test_infra_threadpool` | 线程池：入队/批量/队列/关闭/状态 | 9 |
 | `test_infra_mempool` | 内存池：分配/FIFO/耗尽/RAII/统计 | 11 |
-| `test_infra_logger` | 日志系统：级别过滤/模块过滤/输出 | 6 |
-| `test_http_route` | 路由匹配：静态/动态/通配符/404/方法 | 9 |
+| `test_infra_logger` | 日志：级别过滤/模块过滤/输出 | 6 |
+| `test_http_route` | 路由：静态/动态/通配符/`:param` 形态等价性/404/方法 | 11 |
 | `test_http_middleware` | 中间件链：洋葱模型/路径过滤/鉴权 | 6 |
-| `test_http_session` | 会话管理：CRUD/过期/清理/Cookie | 11 |
+| `test_http_session` | 会话：CRUD/过期/清理/Cookie | 13 |
 | `test_http_response` | 响应构建：HTML/JSON/File/Binary/重定向 | 12 |
-| `test_http_template` | 模板引擎：加载/变量替换/fallback | 5 |
-| `test_http_db` | 数据库连接池：初始化/获取/查询/计数 | 5 |
-| `test_edge_input` | 异常输入：Header过大/路径穿越/畸形请求 | 6 |
-| `test_edge_stress` | 并发压力：1000请求/统计/重启/fd泄露 | 4 |
+| `test_http_template` | 模板：加载/变量替换/fallback | 5 |
+| `test_http_db` | 数据库连接池：初始化/获取/查询/计数/TCP 探测（无库时 1 通过 + 5 跳过） | 6 |
+| `test_edge_input` | 异常输入：Header 过大/路径穿越/畸形请求 | 7 |
+| `test_edge_stress` | 并发压力：1000 请求/统计/重启/fd 泄露 | 4 |
+| `test_http_hardening` | 加固回归：信号/管线化/框架头/慢速滴灌/畸形请求 | 20 |
+| `test_http_keepalive` | 长连接：复用/管线化/空闲回收 | 5 |
 
 ### 性能基准测试
 
@@ -614,6 +612,10 @@ bash scripts/run_http_bench.sh main results/main
 
 # 生成报告
 bash scripts/generate_report.sh
+
+# 或使用标准化入口：启动服务前会校验监听者身份，不通过则整批作废
+bash scripts/bench_http.sh          # 全量：并发梯度 + 每请求 CPU + 内存池交替 + 短连接（约 8 分钟）
+bash scripts/bench_http.sh quick    # 快速回归：100/1000 两档 + 内存池单轮（约 2 分钟）
 ```
 
 > **注意**：使用 `--template` 选项时需在 build 目录下运行（`cd build && ./examples/bench_server ...`），
