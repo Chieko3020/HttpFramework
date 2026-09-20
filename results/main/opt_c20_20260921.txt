@@ -1,0 +1,17 @@
+# 路由/中间件重复匹配 —— 优化后现值（c=20）
+# 分支: main（4fcd2dc）
+# 时间: 2026-09-21T03:33:17+08:00
+# 环境: 2 vCPU / 1967 MB / 6.8.0-90-generic
+# 工具: wrk 4.2.0 [epoll] Copyright (C) 2012 Will Glozer；wrk -t4 -c20 -d30s --latency，同机 loopback
+# 被测: main/build/examples/bench_server（bench_server --threads 4）
+---
+== 50 层中间件（/bench/plaintext）
+   URL: http://127.0.0.1:18090/bench/plaintext  参数: --middleware 50
+   Requests/sec: 23855.48   p50: 771.00us
+== 500 条路由、命中末条（/bench/routes/499）
+   URL: http://127.0.0.1:18090/bench/routes/499  参数: --routes 500
+   Requests/sec: 32900.63   p50: 575.00us
+== 500 条路由、命中靠前（/bench/routes/0）
+   URL: http://127.0.0.1:18090/bench/routes/0  参数: --routes 500
+   Requests/sec: 33761.53   p50: 555.00us
+# 结束 2026-09-21T03:34:54+08:00

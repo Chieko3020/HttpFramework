@@ -1,20 +1,20 @@
 === c2_session_off: Session OFF 时的吞吐量 ===
 分支: main
-时间: 2026-09-20T22:18:17+08:00
+时间: 2026-09-21T03:12:23+08:00
 环境: 2 vCPU / 1968 MB / Linux 6.8.0-90-generic
 环境-CPU: Intel(R) Xeon(R) Gold 6148 CPU @ 2.40GHz × 2
 环境-gcc: g++ (Ubuntu 13.3.0-6ubuntu2~24.04) 13.3.0
-环境-git-HEAD: ecfcc9362520290795a690cab8cf4f3edd49d6e6
+环境-git-HEAD: 4fcd2dcbcf21789dcc98d370d192f48b1cf51c66
 环境-wrk: wrk 4.2.0 [epoll] Copyright (C) 2012 Will Glozer
 环境-governor: 不可读（固定失败：sysfs 无 cpufreq 驱动（虚拟机/容器常见）；已尝试 cpupower frequency-set -g performance，无效）
-环境-记录时间: 2026-09-20T22:18:17+08:00
+环境-记录时间: 2026-09-21T03:12:23+08:00
 说明: 压测端与被测服务同机（环回），服务线程数见各项 --threads，wrk 线程数 -t2
 ---
 Running 30s test @ http://localhost:18980/bench/plaintext
   2 threads and 100 connections
   Thread Stats   Avg      Stdev     Max   +/- Stdev
-    Latency     2.60ms    0.99ms  17.16ms   72.16%
-    Req/Sec    18.72k     2.08k   24.94k    66.67%
-  1118473 requests in 30.02s, 193.07MB read
-Requests/sec:  37257.23
-Transfer/sec:      6.43MB
+    Latency     2.63ms    1.00ms  16.43ms   72.73%
+    Req/Sec    18.50k     2.16k   26.90k    68.50%
+  1104730 requests in 30.03s, 190.69MB read
+Requests/sec:  36786.20
+Transfer/sec:      6.35MB

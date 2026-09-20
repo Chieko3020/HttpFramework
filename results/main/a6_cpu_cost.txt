@@ -1,23 +1,23 @@
 === a6_cpu_cost: 每请求 CPU 时间 (utime+stime / 请求数) ===
 分支: main
-时间: 2026-09-20T22:13:14+08:00
+时间: 2026-09-21T03:07:20+08:00
 环境: 2 vCPU / 1968 MB / Linux 6.8.0-90-generic
 环境-CPU: Intel(R) Xeon(R) Gold 6148 CPU @ 2.40GHz × 2
 环境-gcc: g++ (Ubuntu 13.3.0-6ubuntu2~24.04) 13.3.0
-环境-git-HEAD: ecfcc9362520290795a690cab8cf4f3edd49d6e6
+环境-git-HEAD: 4fcd2dcbcf21789dcc98d370d192f48b1cf51c66
 环境-wrk: wrk 4.2.0 [epoll] Copyright (C) 2012 Will Glozer
 环境-governor: 不可读（固定失败：sysfs 无 cpufreq 驱动（虚拟机/容器常见）；已尝试 cpupower frequency-set -g performance，无效）
-环境-记录时间: 2026-09-20T22:13:14+08:00
+环境-记录时间: 2026-09-21T03:07:20+08:00
 说明: 压测端与被测服务同机（环回），服务线程数见各项 --threads，wrk 线程数 -t2
 ---
 Running 30s test @ http://localhost:18980/bench/plaintext
   2 threads and 500 connections
   Thread Stats   Avg      Stdev     Max   +/- Stdev
-    Latency    13.18ms    4.07ms  39.71ms   69.47%
-    Req/Sec    18.45k     2.69k   25.81k    65.55%
-  1102625 requests in 30.07s, 190.33MB read
-Requests/sec:  36670.82
-Transfer/sec:      6.33MB
-CPU ticks: 0 -> 3616 (CLK_TCK=100)
-总请求: 1102625
-每请求 CPU 时间: 32.79 us
+    Latency    12.04ms    3.76ms  38.85ms   70.24%
+    Req/Sec    20.13k     2.33k   26.68k    66.89%
+  1201914 requests in 30.03s, 207.47MB read
+Requests/sec:  40018.61
+Transfer/sec:      6.91MB
+CPU ticks: 0 -> 3558 (CLK_TCK=100)
+总请求: 1201914
+每请求 CPU 时间: 29.60 us

@@ -1,0 +1,23 @@
+# 内存池调用频率（/stats 的 mempool.alloc_calls 差分）
+# 分支: main   时间: 2026-09-21T03:57:06+08:00
+# 环境: 2 vCPU / 1967 MB / 6.8.0-90-generic
+# 工具: wrk 4.2.0 -t4 -c500 -d30s；被测 /home/ubuntu/Job/projects/personal/HttpFramework/main/build/examples/bench_server --threads 4
+# 用途：判断「内存池默认关闭」的依据——分配调用频率而非单批吞吐
+---
+### /stats 原始样例：
+{"status":"ok","mempool":null}== 长连接（默认，无池）
+   参数:  连接模式: 长连接  并发 500 / 30s
+   请求数: 1018053   alloc_calls: ? -> ?   增量: 0
+   Requests/sec: 33846.98
+== 短连接（默认，无池）
+   参数:  连接模式: 短连接  并发 500 / 30s
+   请求数: 358342   alloc_calls: ? -> ?   增量: 0
+   Requests/sec: 11910.22
+== 长连接（--mempool）
+   参数: --mempool 连接模式: 长连接  并发 500 / 30s
+   请求数: 1062719   alloc_calls: 0 -> 0   增量: 0
+   Requests/sec: 35352.21
+== 短连接（--mempool）
+   参数: --mempool 连接模式: 短连接  并发 500 / 30s
+   请求数: 346536   alloc_calls: 0 -> 0   增量: 0
+   Requests/sec: 11523.45

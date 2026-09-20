@@ -1,0 +1,22 @@
+# 测试套件状态（2026-09-21T03:59:18+08:00）
+# 环境: 2 vCPU / 1967 MB
+---
+## main（build/，Release）
+13/13 Test #13: test_http_hardening ..............   Passed   43.09 sec
+
+100% tests passed, 0 tests failed out of 13
+
+Label Time Summary:
+requires-db    =   0.05 sec*proc (1 test)
+
+Total Test time (real) =  72.67 sec
+
+## feature/WebSocket（build-wss/，Release + ENABLE_WSS=ON）
+16/16 Test #16: test_wss_router ..................   Passed    0.01 sec
+
+100% tests passed, 0 tests failed out of 16
+
+Label Time Summary:
+requires-db    =   0.01 sec*proc (1 test)
+
+Total Test time (real) =  89.04 sec

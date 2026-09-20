@@ -1,48 +1,48 @@
 === b3_routes: 不同路由数量的吞吐量退化 ===
 分支: main
-时间: 2026-09-20T22:16:07+08:00
+时间: 2026-09-21T03:10:13+08:00
 环境: 2 vCPU / 1968 MB / Linux 6.8.0-90-generic
 环境-CPU: Intel(R) Xeon(R) Gold 6148 CPU @ 2.40GHz × 2
 环境-gcc: g++ (Ubuntu 13.3.0-6ubuntu2~24.04) 13.3.0
-环境-git-HEAD: ecfcc9362520290795a690cab8cf4f3edd49d6e6
+环境-git-HEAD: 4fcd2dcbcf21789dcc98d370d192f48b1cf51c66
 环境-wrk: wrk 4.2.0 [epoll] Copyright (C) 2012 Will Glozer
 环境-governor: 不可读（固定失败：sysfs 无 cpufreq 驱动（虚拟机/容器常见）；已尝试 cpupower frequency-set -g performance，无效）
-环境-记录时间: 2026-09-20T22:16:07+08:00
+环境-记录时间: 2026-09-21T03:10:13+08:00
 说明: 压测端与被测服务同机（环回），服务线程数见各项 --threads，wrk 线程数 -t2
 ---
   --- 路由数: 10 ---
 Running 15s test @ http://localhost:18980/bench/plaintext
   2 threads and 100 connections
   Thread Stats   Avg      Stdev     Max   +/- Stdev
-    Latency     2.47ms    0.94ms  15.49ms   71.64%
-    Req/Sec    19.56k     1.97k   24.57k    66.67%
-  583893 requests in 15.01s, 100.79MB read
-Requests/sec:  38904.64
-Transfer/sec:      6.72MB
+    Latency     2.57ms    0.97ms  12.35ms   73.23%
+    Req/Sec    18.92k     2.36k   27.68k    70.00%
+  565121 requests in 15.01s, 97.55MB read
+Requests/sec:  37639.22
+Transfer/sec:      6.50MB
   --- 路由数: 100 ---
 Running 15s test @ http://localhost:18980/bench/plaintext
   2 threads and 100 connections
   Thread Stats   Avg      Stdev     Max   +/- Stdev
-    Latency     2.44ms    0.96ms  14.07ms   72.56%
-    Req/Sec    19.87k     1.82k   24.86k    68.33%
-  593576 requests in 15.02s, 102.46MB read
-Requests/sec:  39529.71
-Transfer/sec:      6.82MB
+    Latency     2.43ms    0.95ms  14.86ms   74.32%
+    Req/Sec    19.99k     1.94k   25.30k    69.00%
+  597442 requests in 15.02s, 103.13MB read
+Requests/sec:  39778.26
+Transfer/sec:      6.87MB
   --- 路由数: 500 ---
 Running 15s test @ http://localhost:18980/bench/plaintext
   2 threads and 100 connections
   Thread Stats   Avg      Stdev     Max   +/- Stdev
-    Latency     2.36ms    0.89ms   9.91ms   71.66%
-    Req/Sec    20.56k     1.72k   25.19k    64.00%
-  613932 requests in 15.01s, 105.97MB read
-Requests/sec:  40899.69
-Transfer/sec:      7.06MB
+    Latency     2.57ms    0.97ms  12.58ms   70.95%
+    Req/Sec    18.95k     2.13k   26.02k    64.33%
+  565743 requests in 15.01s, 97.66MB read
+Requests/sec:  37690.21
+Transfer/sec:      6.51MB
   --- 路由数: 1000 ---
 Running 15s test @ http://localhost:18980/bench/plaintext
   2 threads and 100 connections
   Thread Stats   Avg      Stdev     Max   +/- Stdev
-    Latency     2.62ms    1.00ms  13.59ms   72.95%
-    Req/Sec    18.69k     2.21k   24.18k    74.00%
-  557995 requests in 15.01s, 96.32MB read
-Requests/sec:  37174.13
-Transfer/sec:      6.42MB
+    Latency     2.64ms    0.94ms  11.97ms   71.14%
+    Req/Sec    18.43k     2.12k   24.97k    71.00%
+  550410 requests in 15.02s, 95.01MB read
+Requests/sec:  36653.60
+Transfer/sec:      6.33MB
