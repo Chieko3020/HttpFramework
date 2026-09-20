@@ -232,6 +232,11 @@ public:
     std::shared_ptr<session::SessionManager>  sessionManager() { return sessionMgr_; }
     std::shared_ptr<db::DbConnectionPool>     dbPool()         { return dbPool_; }
 
+    // 底层 HttpServer（start() 之前为 nullptr）。用于读取服务自持的运行时资源，
+    // 例如内存池统计：`app.server()->memoryPool()`——统计必须走这里，
+    // 读进程级 GlobalMemoryPool 会永远得到 0（L10）。
+    std::shared_ptr<http::HttpServer>         server()         { return server_; }
+
     // 真实统计：转发到 HttpServer 的统计对象。
     // 此前返回的是 App 自己那个从未被写入的 stats_，读出来恒为 0（H15）。
     // 未 start() 时返回零值统计（成员 stats_）。

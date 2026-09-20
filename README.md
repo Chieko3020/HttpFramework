@@ -363,8 +363,18 @@ early data 时**才强制（`WebSocketCodec.h:71-77`）。早期版本用环境�
 因此只表述为**无可观测收益**，不给加速比。池在启动时预分配 5000 块，开池后空载 RSS
 从 4.3 MB 升到 23.9 MB，**默认关闭**。
 
-> 读数提示：`--mempool` 下 `curl /stats` 的 `mempool` 计数读的是进程级 `GlobalMemoryPool`，
-> 而服务实际使用的是 `HttpServer` 自持的池，该计数当前恒为 0，不能用来衡量分配频率。
+分配频率（`curl /stats` 的 `mempool.alloc_calls` 差分；500 并发 × 30 s，原始输出
+`results/wss/mempool_alloc_20260921.txt`）：
+
+| 连接模式 | 请求数 | alloc 增量 | 每千请求 |
+|---|---|---|---|
+| 长连接 | 1,159,469 | 502 | 0.43 |
+| 短连接（`Connection: close`） | 421,508 | 421,922 | **1,001.0** |
+
+长连接下每条连接只取一次请求缓冲，调用频率是千分之零点几；短连接下**每请求一次**分配，
+这才是内存池的设计场景——而实测短连接下开池同样没有正向收益，因此不值得为它引入一套
+预分配与生命周期管理。`--mempool` 下 `/stats` 读的是服务自持的池（`app.server()->memoryPool()`），
+未开池时该字段为 `null`。
 
 
 ### WebSocket over TLS 1.3（`-DENABLE_WSS=ON`）
@@ -424,11 +434,11 @@ early data 时**才强制（`WebSocketCodec.h:71-77`）。早期版本用环境�
 ```bash
 # 默认配置（仅 HTTP）
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release && cmake --build build -j
-cd build && ctest --output-on-failure          # 13/13
+cd build && ctest --output-on-failure          # 14/14
 
 # 启用 WSS 扩展
 cmake -S . -B build-wss -DCMAKE_BUILD_TYPE=Release -DENABLE_WSS=ON
-cmake --build build-wss -j && cd build-wss && ctest --output-on-failure   # 16/16
+cmake --build build-wss -j && cd build-wss && ctest --output-on-failure   # 17/17
 ```
 
 | 测试文件 | 覆盖内容 | 用例数 |
@@ -445,6 +455,7 @@ cmake --build build-wss -j && cd build-wss && ctest --output-on-failure   # 16/1
 | `test_edge_input` | 异常输入：Header 过大/路径穿越/畸形请求 | 7 |
 | `test_edge_cert` | 证书异常：有效证书/文件不存在/证书与私钥不匹配/对照组（需 WSS） | 5 |
 | `test_edge_stress` | 并发压力：1000 请求/统计/重启/fd 泄露 | 4 |
+| `test_http_mempool_stats` | 内存池统计口径：未启用为 `nullptr`、启用后指向自持池、计数随请求增长 | 2 |
 | `test_http_hardening` | 加固回归：信号/管线化/框架头/慢速滴灌/畸形请求 | 20 |
 | `test_http_keepalive` | 长连接：复用/管线化/空闲回收 | 5 |
 | `test_wss_hardening` | WSS 回归：升级校验/`onClose`/分片上限/出站顺序/半开连接/Close 帧（需 WSS） | 11 |
