@@ -66,7 +66,7 @@ private:
     // 清理线程函数
     void cleanupThreadFunction();
     
-    // 生成唯一的会话ID
+    // 生成会话ID（无锁，不检查唯一性）
     std::string generateSessionId();
 };
 

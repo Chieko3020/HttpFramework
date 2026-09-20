@@ -14,7 +14,7 @@
 namespace http {
 
 std::mutex Logger::mu_;
-LogLevel Logger::minLevel_ = LogLevel::Info;
+std::atomic<int> Logger::minLevel_{static_cast<int>(LogLevel::Info)};
 std::unique_ptr<std::ofstream> Logger::fileOut_;
 
 namespace {
@@ -29,8 +29,7 @@ bool ensureDir(const std::string& path) {
 }  // namespace
 
 void Logger::setMinLevel(LogLevel level) {
-    std::lock_guard<std::mutex> lk(mu_);
-    minLevel_ = level;
+    minLevel_.store(static_cast<int>(level), std::memory_order_relaxed);
 }
 
 bool Logger::initFileLog(const std::string& logDir, const std::string& logFile) {
@@ -76,8 +75,8 @@ std::string Logger::nowString() {
 void Logger::log(LogLevel level, const std::string& module, const std::string& message) {
     std::lock_guard<std::mutex> lk(mu_);
 
-    // 级别过滤
-    if (static_cast<int>(level) < static_cast<int>(minLevel_)) return;
+    // 级别过滤（minLevel_ 为原子，热路径可无锁预判）
+    if (static_cast<int>(level) < minLevel_.load(std::memory_order_relaxed)) return;
 
     // 控制台输出：[LEVEL][MODULE]：message
     std::ostringstream consoleLine;

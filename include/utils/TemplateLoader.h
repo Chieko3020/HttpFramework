@@ -34,7 +34,7 @@ public:
             }
         }
         // 3) 都没找到，返回 fallback 页面
-        std::cerr << "Warning: Could not open template file: " << templateName << std::endl;
+        std::cerr << "[WARN][模板]：无法打开模板文件: " << templateName << std::endl;
         return generateFallbackTemplate(templateName);
     }
 

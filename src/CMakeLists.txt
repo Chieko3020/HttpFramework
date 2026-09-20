@@ -6,6 +6,7 @@ set(HTTP_SOURCES
     http/HttpServer.cpp
     middleware/SessionMiddleware.cpp
     utils/MemoryPool.cpp
+    utils/SocketCompat.cpp
     utils/ThreadPool.cpp
     utils/Logger.cpp
     session/Session.cpp

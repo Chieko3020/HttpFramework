@@ -6,6 +6,11 @@ include(CMakeFindDependencyMacro)
 find_dependency(Threads)
 find_dependency(Boost COMPONENTS system)
 
+# WSS 扩展需要 OpenSSL（仅在构建时开启了 ENABLE_WSS 时生效）
+if(@ENABLE_WSS@)
+    find_dependency(OpenSSL)
+endif()
+
 include("${CMAKE_CURRENT_LIST_DIR}/HttpFrameworkTargets.cmake")
 
 check_required_components(HttpFramework)

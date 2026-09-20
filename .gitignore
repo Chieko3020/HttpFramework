@@ -107,3 +107,6 @@ config.ini
 *.tar.xz
 *.zip
 *.app
+TODO
+build-wss/
+build-*/

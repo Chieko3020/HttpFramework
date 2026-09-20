@@ -13,7 +13,7 @@ ThreadPool::ThreadPool(size_t threadCount)
         });
     }
     
-    std::cout << "ThreadPool initialized with " << threadCount << " threads" << std::endl;
+    std::cout << "[INFO][线程池]：初始化完成, 线程数=" << threadCount << "" << std::endl;
 }
 
 ThreadPool::~ThreadPool() {
@@ -49,12 +49,16 @@ void ThreadPool::workerFunction() {
             try {
                 task();
             } catch (const std::exception& e) {
-                std::cerr << "Task execution error: " << e.what() << std::endl;
+                std::cerr << "[ERROR][线程池]：任务执行异常: " << e.what() << std::endl;
             }
             
-            // 任务完成，减少活跃任务计数
+            // 任务完成，减少活跃任务计数。
+            // 归零时必须在持 queueMutex_ 的情况下通知：waitForAllTasks 的谓词
+            // 也是在持锁状态下求值的，否则通知可能落在"谓词检查完、进入等待前"
+            // 的窗口里，等待方永久阻塞（丢失唤醒）（L2）。
             size_t remaining = activeTasks_.fetch_sub(1) - 1;
             if (remaining == 0) {
+                std::unique_lock<std::mutex> lock(queueMutex_);
                 finishedCondition_.notify_all();
             }
         }
@@ -64,6 +68,25 @@ void ThreadPool::workerFunction() {
 size_t ThreadPool::getQueueSize() const {
     std::lock_guard<std::mutex> lock(queueMutex_);
     return tasks_.size();
+}
+
+// 与 enqueue 的唯一区别：不构造 packaged_task / future。
+// 任务体的异常由 workerFunction 统一捕获（与 enqueue 路径相同）。
+//
+// 空 std::function 必须挡在入队之前：worker 侧对空任务既不执行也不递减
+// activeTasks_（enqueue 路径永远非空 —— packaged_task 包装过），放进去就会
+// 让计数永久大于 0，waitForAllTasks() 再也等不到 tasks_.empty() && 计数==0。
+void ThreadPool::enqueueDetached(std::function<void()> task) {
+    if (!task) throw std::invalid_argument("enqueueDetached: empty task");
+    {
+        std::lock_guard<std::mutex> lock(queueMutex_);
+        if (!running_.load()) {
+            throw std::runtime_error("enqueue on stopped ThreadPool");
+        }
+        tasks_.push(std::move(task));
+        activeTasks_.fetch_add(1);
+    }
+    condition_.notify_one();
 }
 
 void ThreadPool::shutdown() {
@@ -85,7 +108,7 @@ void ThreadPool::shutdown() {
     
     workers_.clear();
     
-    std::cout << "ThreadPool shutdown complete" << std::endl;
+    std::cout << "[INFO][线程池]：已关闭" << std::endl;
 }
 
 void ThreadPool::waitForAllTasks() {

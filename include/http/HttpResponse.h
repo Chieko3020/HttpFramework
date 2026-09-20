@@ -69,8 +69,10 @@ public:
     // 获取响应体
     const std::string& getBody() const { return body_; }
     
-    // 生成HTTP响应字符串
-    std::string toString() const;
+    // 生成HTTP响应字符串。
+    // suppressBody=true 时只输出状态行与头部（保留 Content-Length），
+    // 供 HEAD 请求使用（RFC 9110 §9.3.2：HEAD 的响应不得携带消息体）（H13）
+    std::string toString(bool suppressBody = false) const;
     
     // 清空响应
     void clear();
@@ -78,6 +80,11 @@ public:
     // 检查是否已发送
     bool isSent() const { return sent_; }
     void setSent(bool sent) { sent_ = sent; }
+
+    // 响应已终结：内容已由框架自身决定（例如请求体超限的 413），
+    // 不允许路由器 / 业务 handler 再覆盖它（否则 413 会被路由改成 404）。
+    bool isFinalized() const { return sent_; }
+    void markFinalized() { sent_ = true; }
 
 private:
     int statusCode_;
@@ -88,6 +95,9 @@ private:
     
     // 获取状态码对应的原因短语
     std::string getReasonPhrase(int statusCode) const;
+
+    // 头名归一化：小写键 + 规范拼写（M10）
+    static std::string canonicalHeaderName(const std::string& name);
     
     // 获取当前时间字符串（用于Date头部）
     std::string getCurrentTime() const;

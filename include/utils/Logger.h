@@ -5,6 +5,7 @@
 // 格式：[时间][级别][模块]：消息（文件输出含时间戳，控制台不含）
 // 用法：LOG_INFO("HTTP", "服务启动, port=" << 8080);
 
+#include <atomic>
 #include <fstream>
 #include <memory>
 #include <mutex>
@@ -35,12 +36,18 @@ public:
     // 统一日志输出（供宏调用）
     static void log(LogLevel level, const std::string& module, const std::string& message);
 
+    // 当前级别下该级别是否会输出：热路径用它包住日志宏，
+    // 避免"先格式化再丢弃"的开销（M7）
+    static bool isEnabled(LogLevel level) {
+        return static_cast<int>(level) >= minLevel_.load(std::memory_order_relaxed);
+    }
+
 private:
     static const char* levelLabel(LogLevel level);
     static std::string nowString();
 
     static std::mutex mu_;
-    static LogLevel minLevel_;
+    static std::atomic<int> minLevel_;
     static std::unique_ptr<std::ofstream> fileOut_;
 };
 
