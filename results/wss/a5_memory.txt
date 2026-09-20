@@ -1,12 +1,20 @@
 === a5_memory: 内存占用 (RSS) 在持续负载下 ===
 分支: feature/WebSocket
-时间: 2026-05-30T16:46:34+08:00
+时间: 2026-09-20T22:31:54+08:00
+环境: 2 vCPU / 1968 MB / Linux 6.8.0-90-generic
+环境-CPU: Intel(R) Xeon(R) Gold 6148 CPU @ 2.40GHz × 2
+环境-gcc: g++ (Ubuntu 13.3.0-6ubuntu2~24.04) 13.3.0
+环境-git-HEAD: d3720d7921cba6d5a5dabb56304c4f6b2ccda619
+环境-wrk: wrk 4.2.0 [epoll] Copyright (C) 2012 Will Glozer
+环境-governor: 不可读（固定失败：sysfs 无 cpufreq 驱动（虚拟机/容器常见）；已尝试 cpupower frequency-set -g performance，无效）
+环境-记录时间: 2026-09-20T22:31:54+08:00
+说明: 压测端与被测服务同机（环回），服务线程数见各项 --threads，wrk 线程数 -t2
 ---
 初始 RSS:
-VmRSS:	   26404 kB
+VmRSS:	    6144 kB
 负载中 RSS (30s):
-VmRSS:	   28412 kB
+VmRSS:	    7552 kB
 负载中 RSS (60s):
-VmRSS:	   28488 kB
+VmRSS:	    7680 kB
 负载后 RSS (空闲):
-VmRSS:	   28488 kB
+VmRSS:	    7680 kB
