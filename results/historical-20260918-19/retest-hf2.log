@@ -1,0 +1,51 @@
+### 组1 无内存池 并发梯度（与修复前基线对照）
+=== 无池 (c=100) ===
+     50%    2.63ms
+     99%    5.62ms
+Requests/sec:  36753.36
+=== 无池 (c=500) ===
+     50%   14.47ms
+     99%   27.63ms
+Requests/sec:  33410.55
+=== 无池 (c=1000) ===
+     50%   28.89ms
+     99%   54.08ms
+Requests/sec:  33335.79
+=== 无池 (c=2000) ===
+     50%   62.86ms
+     99%  102.01ms
+Requests/sec:  31001.92
+=== 无池 (c=5000) ===
+     50%  151.03ms
+     99%  229.64ms
+  Socket errors: connect 0, read 8, write 0, timeout 0
+Requests/sec:  31997.15
+VmHWM:	   10412 kB
+VmRSS:	   10276 kB
+### 组2 中间件 50 层（第三轮优化场景）
+=== 中间件50 (c=1000) ===
+     50%  563.57ms
+     99%  646.06ms
+Requests/sec:   1721.80
+### 组3 路由 500 条：命中靠前 vs 靠后
+=== 路由500-靠前(/bench/plaintext) (c=1000) ===
+     50%   28.35ms
+     99%   52.00ms
+Requests/sec:  33974.87
+=== 路由500-靠后(/bench/routes/499) ===
+     50%   91.40ms
+     99%  117.58ms
+Requests/sec:  10711.53
+### 组4 内存池对照（交替 3 轮，c=1000 长连接）
+  [off round1] 33770.71 req/s
+  [on round1] 32412.81 req/s
+  [off round2] 32321.69 req/s
+  [on round2] 34313.62 req/s
+  [off round3] 31293.41 req/s
+  [on round3] 34305.83 req/s
+### 组5 短连接（c=1000）
+=== 无池-短连接 (c=1000) ===
+     50%   70.11ms
+     99%  146.76ms
+Requests/sec:  11954.69
+=== RETEST-HF2-DONE ===

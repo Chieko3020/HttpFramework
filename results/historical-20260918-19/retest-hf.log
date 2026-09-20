@@ -1,0 +1,76 @@
+### 组1 无内存池（长连接）
+  HTTP 端口:    19020
+  内存池:       禁用
+=== 无池 长连接 (c=100) ===
+    Latency     2.64ms    1.19ms  26.18ms   74.66%
+  Latency Distribution
+     50%    2.49ms
+     99%    6.07ms
+  1128224 requests in 30.04s, 194.75MB read
+Requests/sec:  37552.64
+=== 无池 长连接 (c=500) ===
+    Latency    14.46ms    4.76ms  53.80ms   69.41%
+  Latency Distribution
+     50%   14.18ms
+     99%   27.15ms
+  1021058 requests in 30.08s, 176.25MB read
+Requests/sec:  33945.88
+=== 无池 长连接 (c=1000) ===
+    Latency    29.47ms    8.60ms  90.01ms   70.99%
+  Latency Distribution
+     50%   28.56ms
+     99%   54.31ms
+  1005203 requests in 30.05s, 173.51MB read
+Requests/sec:  33450.34
+CPU: 3244 jiffies over 30.076260165s
+=== 无池 长连接 (c=2000) ===
+    Latency    64.80ms   14.54ms 146.31ms   71.54%
+  Latency Distribution
+     50%   64.05ms
+     99%  103.60ms
+  914741 requests in 30.09s, 157.90MB read
+Requests/sec:  30403.98
+=== 无池 长连接 (c=5000) ===
+    Latency   144.11ms   27.19ms 296.14ms   71.31%
+  Latency Distribution
+     50%  142.11ms
+     99%  219.39ms
+  1024978 requests in 30.10s, 176.93MB read
+Requests/sec:  34048.23
+VmHWM:	   11748 kB
+VmRSS:	   11412 kB
+### 组2 内存池（长连接，c=1000）
+  HTTP 端口:    19021
+  内存池:       启用
+[INFO][HTTP服务器]：内存池已启用 (块容量=12288 字节, 块数=5000)
+=== 内存池 长连接 (c=1000) ===
+    Latency    26.79ms    7.06ms  76.93ms   70.64%
+  Latency Distribution
+     50%   26.28ms
+     99%   46.62ms
+  1104839 requests in 30.08s, 190.71MB read
+Requests/sec:  36730.93
+VmHWM:	   27264 kB
+VmRSS:	   27264 kB
+### 组3 无池 短连接（Connection: close，c=1000）
+=== 无池 短连接 (c=1000) ===
+    Latency    56.85ms   24.55ms 166.84ms   66.66%
+  Latency Distribution
+     50%   55.62ms
+     99%  115.52ms
+  442054 requests in 30.10s, 74.20MB read
+Requests/sec:  14688.35
+### 组4 内存池 短连接（c=1000）
+=== 内存池 短连接 (c=1000) ===
+    Latency    60.37ms   25.97ms 166.34ms   70.14%
+  Latency Distribution
+     50%   58.79ms
+     99%  133.03ms
+  427358 requests in 30.11s, 71.73MB read
+Requests/sec:  14192.05
+### 组5 /stats 与 RSS 基线（池未启用时不应建池）
+{"status":"ok","mempool":null}
+VmHWM:	    4224 kB
+VmRSS:	    4224 kB
+200
+=== RETEST-HF-DONE ===
