@@ -257,7 +257,8 @@ cmake --build build
 - **独立线程池**：业务逻辑不在 Reactor 线程里跑，交给共享线程池；响应回写经 **eventfd** 唤醒
   子 Reactor 完成（工作线程不直接操作别人的 epoll）
 - **HTTP 长连接**：支持 keep-alive 与空闲超时回收；管线化请求按序处理
-- **固定块内存池（可选）**：请求/响应缓冲从预分配块里取，块大小与块数可配
+- **固定块内存池（可选）**：请求缓冲从预分配块里取；响应侧不使用固定块池，
+  由 I/O 线程独占的 `std::string` 承载。块大小与块数可配
 
 ### 能力边界
 
@@ -348,7 +349,7 @@ cmake --build build
                   ┌──────────────────────────┐
                   │ 共享线程池（默认 4 线程） │  业务处理：中间件链 → 路由 → handler
                   └───────────┬──────────────┘
-                              │ 写响应：push 到目标连接的 pendingWrites
+                              │ 写响应：把 PendingResponse 投递到目标连接的 pendingResponses
                               │ 然后 write(eventfd) 唤醒**属于该连接**的子 Reactor
                               ▼
                   子 Reactor 线程：从队列取出 → EPOLL_CTL_MOD 重新注册 → send
@@ -373,7 +374,7 @@ sequenceDiagram
     Note over SR: ONESHOT 已消费，暂不再监听该连接
     TP->>H: 中间件链 → 路由匹配 → handler
     H->>H: 生成响应（序列化）
-    H->>SR: pendingWrites.push(connId) + write(eventfd)
+    H->>SR: pendingResponses.push_back({connId, data, keepAlive}) + write(eventfd)
     SR->>SR: EPOLL_CTL_MOD 重新注册 EPOLLIN|ONESHOT
     SR->>C: send 响应
     Note over SR,C: keep-alive 则继续等待下一个请求；空闲超时回收连接
@@ -405,10 +406,18 @@ sub Reactor epoll 监听 → 非阻塞读取 → HTTP 解析 → 提交线程池
 
 ```cpp
 void HttpServer::mainReactorLoop() {
-    while (running_) {
-        int n = epoll_wait(mainEpollFd_, events_, MAX_EVENTS, 1000);
-        for (int i = 0; i < n; ++i) {
-            if (events_[i].data.fd == listenFd_ && (events_[i].events & EPOLLIN))
+    const int MAX_EVENTS = 128;
+    struct epoll_event events[MAX_EVENTS];              // 局部数组，不在对象上保存
+
+    while (running_.load()) {
+        int nfds = epoll_wait(mainEpollFd_, events, MAX_EVENTS, 1000);
+        if (nfds < 0) {
+            if (errno == EINTR) continue;
+            break;
+        }
+        for (int i = 0; i < nfds; ++i) {
+            int fd = net::connIdFd(events[i].data.u64);  // data 里存的是 ConnId，不是裸 fd
+            if (fd == listenFd_ && (events[i].events & EPOLLIN))
                 handleAccept();                 // accept 轮询分发到 sub reactor
         }
     }
@@ -419,14 +428,39 @@ void HttpServer::mainReactorLoop() {
 
 ```cpp
 void HttpServer::subReactorLoop(int index) {
-    while (running_) {
-        int n = epoll_wait(subReactors_[index].epollFd, events, MAX_EVENTS, 1000);
-        for (int i = 0; i < n; ++i) {
-            int fd = events[i].data.fd;
-            if (events[i].events & (EPOLLERR | EPOLLHUP)) closeConnection(fd, index);
-            else {
-                if (events[i].events & EPOLLIN)  handleRead(fd, index);
-                if (events[i].events & EPOLLOUT) handleWrite(fd, index);
+    const int MAX_EVENTS = 1024;
+    struct epoll_event events[MAX_EVENTS];
+    auto& sr = subReactors_[index];
+
+    while (running_.load()) {
+        int nfds = epoll_wait(sr->epollFd, events, MAX_EVENTS, 1000);
+        if (nfds < 0) {
+            if (errno == EINTR) continue;
+            break;
+        }
+        for (int i = 0; i < nfds; ++i) {
+            net::ConnId connId = events[i].data.u64;
+            int fd = net::connIdFd(connId);
+            uint32_t ev = events[i].events;
+
+            if (fd == sr->wakeFd)  { handleWake(index);  continue; }  // eventfd：批量发送响应
+            if (fd == sr->timerFd) { handleTimer(index); continue; }  // timerfd：空闲连接清理
+
+            // 代际校验：fd 号被回收再分配后，内核可能仍投递一次属于旧连接的事件。
+            // 不符时直接丢弃，绝不按"未知连接"去关闭它。
+            if (!ownsConnection(fd, index, connId)) continue;
+
+            if (ev & (EPOLLERR | EPOLLHUP)) {
+                // 不能"看到 HUP 就关"：对端 shutdown(SHUT_WR) 后仍在等响应，
+                // 直接关闭会丢掉已到达的请求与未发出的响应，所以先把可读数据读尽。
+                if (ev & EPOLLIN) handleRead(fd, index, connId);
+                HttpContext* ctx = lookupContext(index, fd);
+                if (ctx && (ctx->inFlightCount() > 0 || ctx->hasCurrentResponse()))
+                    continue;                     // 还有在途请求或待发响应，交给写路径收尾
+                closeConnection(fd, index);
+            } else {
+                if (ev & EPOLLIN)  handleRead(fd, index, connId);
+                if (ev & EPOLLOUT) handleWrite(fd, index);
             }
         }
     }
@@ -438,48 +472,80 @@ void HttpServer::subReactorLoop(int index) {
 子 Reactor 读取到完整 HTTP 请求后，提交到线程池异步处理，子 Reactor 线程立即返回继续监听 I/O：
 
 ```cpp
-void HttpServer::handleRead(int clientFd, int subReactorIndex) {
-    std::string data = readAllData(clientFd);
-    // 解析 HTTP 请求...
+void HttpServer::handleRead(int clientFd, int subReactorIndex, net::ConnId connId) {
+    HttpContext* ctx = lookupContext(subReactorIndex, clientFd);
+    bool peerClosed = false;
+    const size_t totalRead = readAllData(clientFd, ctx, &peerClosed);  // 循环 recv 直到 EAGAIN
+    // totalRead == 0 时用 peerClosed 区分"对端已关闭"与"暂无数据"；
+    // 413（非池缓冲超限）/ 503（池耗尽）等判定略
+    dispatchBufferedRequests(clientFd, subReactorIndex, connId);   // 解析出完整请求后派发
+}
+
+void HttpServer::enqueueRequestTask(int subReactorIndex, int clientFd, net::ConnId connId,
+                                    std::shared_ptr<HttpRequest> request,
+                                    std::shared_ptr<HttpResponse> response) {
+    markInFlight(subReactorIndex, connId, /*enter=*/true);
     auto task = std::make_shared<HttpRequestTask>(
         clientFd, request, response,
-        [this, subReactorIndex](int fd, auto req, auto res) {
-            processHttpRequest(subReactorIndex, fd, req, res);
-        }
-    );
-    threadPool_->enqueue([task]() { task->execute(); });
+        [this, subReactorIndex, connId](int fd, std::shared_ptr<HttpRequest> req,
+                                        std::shared_ptr<HttpResponse> res) {
+            processHttpRequest(subReactorIndex, connId, req, res);  // 回写按 ConnId 归属
+        });
+    // 请求任务不关心返回值，走无 packaged_task / future 的轻量提交路径
+    threadPool_->enqueueDetached([this, subReactorIndex, connId, task]() {
+        try { task->execute(); } catch (...) {}
+        markInFlight(subReactorIndex, connId, /*enter=*/false);
+        finishInFlightTask();
+    });
 }
 ```
 
 ### 边缘触发（ET）读处理
 
-ET 模式下必须循环读取直到 EAGAIN，否则可能丢失数据：
+ET 模式下必须循环读取直到 EAGAIN，否则可能丢失数据。读尽的动作封在 `readAllData` 里；
+读到 EOF 只置位 `peerClosed`、不在这里关闭连接——对端 `shutdown(SHUT_WR)` 之后仍要把响应发完，
+关闭时机由调用方决定：
 
 ```cpp
-void handleRead(int fd) {
-    char buffer[8192];
+size_t HttpServer::readAllData(int fd, HttpContext* ctx, bool* peerClosed) {
+    char buffer[4096];
+    size_t readBytes = 0;
+    if (peerClosed) *peerClosed = false;
+
     while (true) {
-        ssize_t n = read(fd, buffer, sizeof(buffer));
+        ssize_t n = ::recv(fd, buffer, sizeof(buffer), 0);
         if (n > 0) {
-            // 追加到请求缓冲区
-        } else if (n == 0 || (n < 0 && errno != EAGAIN)) {
-            closeConnection(fd);                // 连接关闭或错误
+            ctx->appendData(buffer, static_cast<size_t>(n));    // 直接读进连接请求缓冲
+            readBytes += static_cast<size_t>(n);
+        } else if (n == 0) {
+            if (peerClosed) *peerClosed = true;                 // 对端关闭写方向
             break;
         } else {
-            break;                              // EAGAIN — 数据读完
+            if (errno == EAGAIN || errno == EWOULDBLOCK) break; // 数据读完
+            if (errno == EINTR) continue;
+            if (peerClosed) *peerClosed = true;                 // 致命错误
+            break;
         }
     }
+    return readBytes;
 }
 ```
 
 ### 内存池分配
 
 ```cpp
-void* MemoryPool::allocate() {
+utils::MemoryBlock* utils::HttpMemoryPool::allocate() {
+    allocCalls_.fetch_add(1, std::memory_order_relaxed);
     std::lock_guard<std::mutex> lock(mutex_);
-    if (availableBlocks_.empty()) return nullptr;  // 池耗尽
-    void* block = availableBlocks_.top();
-    availableBlocks_.pop();
+    if (freeBlocks_.empty()) {
+        // 池耗尽：显式计数后返回 nullptr，调用方据此回 503，而不是静默降级
+        allocateFailures_.fetch_add(1, std::memory_order_relaxed);
+        return nullptr;
+    }
+    MemoryBlock* block = freeBlocks_.front();   // 空闲块是 FIFO 队列
+    freeBlocks_.pop();
+    block->isUsed = true;
+    usedBlocks_++;
     return block;
 }
 ```
@@ -488,10 +554,16 @@ void* MemoryPool::allocate() {
 
 ```cpp
 std::shared_ptr<Session> SessionManager::createSession() {
-    std::string id = generateUniqueId();
-    auto session = std::make_shared<Session>(id);
     std::lock_guard<std::mutex> lock(sessionsMutex_);
-    sessions_[id] = session;
+
+    std::string sessionId;
+    do {
+        sessionId = generateSessionId();            // 无锁生成，唯一性在此处校验
+    } while (sessions_.find(sessionId) != sessions_.end());   // id 冲突则重取
+
+    auto session = std::make_shared<Session>(sessionId);
+    session->setExpirationTime(defaultExpiration_); // 构造时即带上默认过期时间
+    sessions_[sessionId] = session;
     return session;
 }
 
@@ -509,13 +581,31 @@ void SessionManager::cleanupExpiredSessions() {
 | 组件 | 职责与关键设计 |
 |---|---|
 | **HttpServer** | epoll ET + `EPOLLONESHOT` 主循环、accept 分发、连接表（代际校验）、空闲超时扫描、连接数上限 |
-| **ConnectionHandler** | 单连接读写状态机：半包、管线化、EOF、`Content-Length`/chunked 边界 |
+| **HttpContext** | 单连接状态：请求缓冲（读游标 + 半包起点）、在途请求计数、待发响应、连接代际 |
 | **HttpRequest / HttpResponse** | 解析与构造：URL 解码、头名大小写归一化、`HEAD` 抑制响应体、序列化用 reserve + 直接拼接 |
 | **Router** | 静态哈希 + `:param` 分段匹配 + `*` 正则回退；method 索引；运行期注册走"拷贝-换入"快照 |
 | **Middleware** | 洋葱模型 + 路径前缀过滤；入口处一次性算好匹配列表，避免每请求整表重算 |
 | **SessionManager** | 内存 / 文件两种存储、Cookie 生命周期（滑动续期）、过期清理、文件存储 ID 白名单 + 原子写 |
-| **MemoryPool** | 固定块（默认 12 KB × 5000）、惰性初始化、分配计数可观测、可运行期开关（默认关闭） |
+| **MemoryPool** | 固定块（默认 12 KB × 5000）、分配计数可观测、启动前开关（默认关闭，运行期调用被忽略并告警） |
 | **ThreadPool** | 任务队列 + 状态统计；`enqueueDetached` 提供无 `packaged_task`/`future` 的轻量路径 |
+
+单连接的"读写状态机"没有单独的类：读入、解析派发与写出分别由
+`HttpServer::handleRead`、`HttpServer::dispatchBufferedRequests`、`HttpServer::writeCurrentResponse`
+完成，连接状态全部放在 `HttpContext` 上。
+
+### HttpServer 关键默认值
+
+| 参数 | 默认值 | 设置入口 |
+|---|---|---|
+| 最大并发连接数 | 10000（0 = 不限制） | `setMaxConnections()` |
+| 空闲连接超时 | 60 秒 | `setIdleTimeout()` |
+| 空闲检查周期 | 5 秒 | `setIdleCheckIntervalSec()` |
+| 单请求体上限 | 64 MB | `setMaxRequestBodyBytes()` |
+| 非池模式单连接请求缓冲上限 | 1 MB | `setMaxRequestBytes()` |
+| 请求头上限 | 16 KB | `setMaxRequestHeaderBytes()` |
+
+空闲检查周期与内存池的块容量/块数在 `start()` 时落地（timerfd 与池实例此时创建），
+运行期修改无效。
 
 ## 关键设计与取舍
 
@@ -528,7 +618,9 @@ void SessionManager::cleanupExpiredSessions() {
 每请求新建/销毁缓冲。但长连接改造之后，500 并发 30 秒里池的 `allocate/deallocate`
 只增加 1002 次（每千请求约 1 次），复用度已经由连接本身提供；在 glibc 的 per-thread
 `tcache` 面前，这把带锁的池不再有优势。三轮交替复测的方向分别是 −3.5% / +6.1% / +1.1%，
-**只能说"无可观测收益"**，所以默认关闭（另外它会预分配约 20 MB）。
+**只能说"无可观测收益"**，所以默认关闭（另外启用它会在 `start()` 阶段一次性构造 5000 个块，
+按 `sizeof(MemoryBlock)` = 12312 字节计约 61.6 MB 堆分配；数据区在写入前不被触碰，
+实测常驻增量约 20 MB，即"20 MB"是 RSS 口径，不是堆分配量）。
 
 **响应序列化。** 早期实现逐个字段拼接、反复扩容；现在先 `reserve` 再直接拼接，
 并把 `Date` 头按秒缓存，避免每个响应都做一次时间格式化。
@@ -545,21 +637,23 @@ void SessionManager::cleanupExpiredSessions() {
 第一版让工作线程直接对子 Reactor 的 epoll 做 `EPOLL_CTL_MOD`，问题有两个：
 ① 两个线程并发操作同一个 epoll 实例；② oneshot 状态下 MOD 会重置状态，可能重复投递或丢事件。
 
-**怎么做的**：每个子 Reactor 一个 `eventfd` + 一个 `pendingWrites` 队列。工作线程只做两件事：
-把连接的 `ConnId` push 进队列、`write(eventfd)`。send 与重新注册全部收敛回子 Reactor 线程。
+**怎么做的**：每个子 Reactor 一个 `eventfd` + 一个 `pendingResponses` 列表。工作线程只做两件事：
+把 `{ConnId, 响应字节, keepAlive}` 投递进列表、`write(eventfd)`。响应内容随投递一起交付，
+工作线程因此完全不触碰 `HttpContext` 的字段；send 与重新注册全部收敛回子 Reactor 线程。
 **顺带**：正因为回写带了 `ConnId`，这里必须做归属校验（见 ③），否则队列里躺着的旧连接
 回调会打到已经复用同一 fd 的新连接上。
 
 ### ② 内存池带来的两个问题
 
-**问题一：12 KB 单块导致响应被静默截断。** `HttpContext::setResponseData` 在池模式下
-调 `responseBuffer_->write(data)` 却**忽略返回值**，而单块只有 12 KB。现象很隐蔽：
-响应头写着 `Content-Length: 20000`，客户端实收 12117–12289 字节，keep-alive 下后续请求还会错位。
-修法是响应侧超限回退 `std::string`、请求侧比对实际写入字节数并回 413（带 `{"limit":...}`）。
+**问题一：12 KB 单块导致响应被静默截断。** 早期实现用一个 12 KB 的池块承载响应，
+写入超出单块时 `PooledBuffer::write` 的返回值没有被检查（该缓冲挂在 `HttpContext` 上，现已移除），
+现象很隐蔽：响应头写着 `Content-Length: 20000`，客户端实收 12117–12289 字节，keep-alive 下后续请求还会错位。
+当时的修法是响应侧超限回退 `std::string`、请求侧比对实际写入字节数并回 413（带 `{"limit":...}`）；
+后续（H5）连这条路径也一并去掉——响应方向改用 `std::string`，不再从池里取块（见"核心组件"的 `HttpContext`）。
 
 **问题二：它其实没有收益。** 长连接改造之后池的调用频率降到每千请求约 1 次
 （500 并发 30 秒累计 1,008,350 请求，`allocate/deallocate` 只增加 1,002 次），
-三轮交替复测方向翻转。**结论是默认关闭**——理由是无收益 + 多占约 20 MB，而不是"性能更差"。
+三轮交替复测方向翻转。**结论是默认关闭**——理由是无收益 + 多占约 20 MB（RSS 口径），而不是"性能更差"。
 
 ### ③ 连接生命周期与 fd 归属：陈旧回调误杀新连接
 
@@ -640,9 +734,10 @@ HttpFramework/
 
 | 场景 | 优化前 | 优化后 |
 |---|---|---|
-| 50 层中间件（c=1000） | 1,810 req/s | **31,134 req/s（×17.2）** |
-| 500 条路由、命中**末条** | 11,069 req/s | **40,115 req/s（×3.6）** |
-| 500 条路由、命中靠前 | —— | ×1.11 |
+| 50 层中间件（c=20） | 1,810 req/s | **31,134 req/s（×17.2）** |
+| 50 层中间件（c=1000） | 1,766 req/s | **21,197 req/s（×12）** |
+| 500 条路由、命中**末条**（c=20） | 11,069 req/s | **40,115 req/s（×3.6）** |
+| 500 条路由、命中靠前（c=20） | 31,766 req/s | **35,317 req/s（×1.11）** |
 
 根因是每个请求都把中间件链与路由表**整表重算**（`findMiddlewares` 走 O(M) 正则、路由逐条匹配）。
 改动是入口处一次性算好中间件列表，路由改为 method 索引 + 静态哈希 + 分段匹配。
