@@ -1,13 +1,13 @@
 === d5_filetransfer_64kb: 文件传输速率 (64KB) ===
 分支: feature/WebSocket
-时间: 2026-09-20T22:39:28+08:00
+时间: 2026-09-21T03:32:23+08:00
 环境: 2 vCPU / 1968 MB / Linux 6.8.0-90-generic
 环境-CPU: Intel(R) Xeon(R) Gold 6148 CPU @ 2.40GHz × 2
 环境-gcc: g++ (Ubuntu 13.3.0-6ubuntu2~24.04) 13.3.0
-环境-git-HEAD: d3720d7921cba6d5a5dabb56304c4f6b2ccda619
+环境-git-HEAD: cd2d29383cc91dc9d2c5ad5092bbe96b4c884aea
 环境-wrk: wrk 4.2.0 [epoll] Copyright (C) 2012 Will Glozer
 环境-governor: 不可读（固定失败：sysfs 无 cpufreq 驱动（虚拟机/容器常见）；已尝试 cpupower frequency-set -g performance，无效）
-环境-记录时间: 2026-09-20T22:39:28+08:00
+环境-记录时间: 2026-09-21T03:32:23+08:00
 ---
 状态: 跳过（缺依赖）
 原因: wscat 不可用（D5 依赖 wscat 通过 wss://localhost:18990/echo 发送数据）

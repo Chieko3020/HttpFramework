@@ -1,13 +1,13 @@
 === d3_maxconn: 最大并发 WSS 连接 ===
 分支: feature/WebSocket
-时间: 2026-09-20T22:39:19+08:00
+时间: 2026-09-21T03:32:13+08:00
 环境: 2 vCPU / 1968 MB / Linux 6.8.0-90-generic
 环境-CPU: Intel(R) Xeon(R) Gold 6148 CPU @ 2.40GHz × 2
 环境-gcc: g++ (Ubuntu 13.3.0-6ubuntu2~24.04) 13.3.0
-环境-git-HEAD: d3720d7921cba6d5a5dabb56304c4f6b2ccda619
+环境-git-HEAD: cd2d29383cc91dc9d2c5ad5092bbe96b4c884aea
 环境-wrk: wrk 4.2.0 [epoll] Copyright (C) 2012 Will Glozer
 环境-governor: 不可读（固定失败：sysfs 无 cpufreq 驱动（虚拟机/容器常见）；已尝试 cpupower frequency-set -g performance，无效）
-环境-记录时间: 2026-09-20T22:39:19+08:00
+环境-记录时间: 2026-09-21T03:32:13+08:00
 ---
 尝试连接数: 100
 成功建立(收到 101 Switching Protocols): 100
@@ -15,4 +15,4 @@
 未能判定(无响应/超时): 0
 判据: 每个并发连接的升级响应首行匹配 ^HTTP/1.[01] 101；未能判定不计入成功
 探测参数: 每连接保持 stdin 8s（并发 TLS 握手在服务端串行排队，保持过短会误判失败）
-总耗时: 9.263048s
+总耗时: 9.310750s

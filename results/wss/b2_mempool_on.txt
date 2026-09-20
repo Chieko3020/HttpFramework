@@ -1,20 +1,20 @@
 === b2_mempool_on: 内存池 ON 时的吞吐量 ===
 分支: feature/WebSocket
-时间: 2026-09-20T22:35:23+08:00
+时间: 2026-09-21T03:28:17+08:00
 环境: 2 vCPU / 1968 MB / Linux 6.8.0-90-generic
 环境-CPU: Intel(R) Xeon(R) Gold 6148 CPU @ 2.40GHz × 2
 环境-gcc: g++ (Ubuntu 13.3.0-6ubuntu2~24.04) 13.3.0
-环境-git-HEAD: d3720d7921cba6d5a5dabb56304c4f6b2ccda619
+环境-git-HEAD: cd2d29383cc91dc9d2c5ad5092bbe96b4c884aea
 环境-wrk: wrk 4.2.0 [epoll] Copyright (C) 2012 Will Glozer
 环境-governor: 不可读（固定失败：sysfs 无 cpufreq 驱动（虚拟机/容器常见）；已尝试 cpupower frequency-set -g performance，无效）
-环境-记录时间: 2026-09-20T22:35:23+08:00
+环境-记录时间: 2026-09-21T03:28:17+08:00
 说明: 压测端与被测服务同机（环回），服务线程数见各项 --threads，wrk 线程数 -t2
 ---
 Running 30s test @ http://localhost:18980/bench/plaintext
   2 threads and 500 connections
   Thread Stats   Avg      Stdev     Max   +/- Stdev
-    Latency    12.71ms    3.95ms  37.86ms   69.22%
-    Req/Sec    19.12k     2.64k   27.12k    60.03%
-  1142044 requests in 30.04s, 197.13MB read
-Requests/sec:  38019.42
-Transfer/sec:      6.56MB
+    Latency    13.21ms    4.14ms  39.37ms   69.07%
+    Req/Sec    18.43k     2.87k   27.51k    67.56%
+  1100308 requests in 30.03s, 189.93MB read
+Requests/sec:  36640.93
+Transfer/sec:      6.32MB

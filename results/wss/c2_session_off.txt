@@ -1,20 +1,20 @@
 === c2_session_off: Session OFF 时的吞吐量 ===
 分支: feature/WebSocket
-时间: 2026-09-20T22:38:03+08:00
+时间: 2026-09-21T03:30:57+08:00
 环境: 2 vCPU / 1968 MB / Linux 6.8.0-90-generic
 环境-CPU: Intel(R) Xeon(R) Gold 6148 CPU @ 2.40GHz × 2
 环境-gcc: g++ (Ubuntu 13.3.0-6ubuntu2~24.04) 13.3.0
-环境-git-HEAD: d3720d7921cba6d5a5dabb56304c4f6b2ccda619
+环境-git-HEAD: cd2d29383cc91dc9d2c5ad5092bbe96b4c884aea
 环境-wrk: wrk 4.2.0 [epoll] Copyright (C) 2012 Will Glozer
 环境-governor: 不可读（固定失败：sysfs 无 cpufreq 驱动（虚拟机/容器常见）；已尝试 cpupower frequency-set -g performance，无效）
-环境-记录时间: 2026-09-20T22:38:03+08:00
+环境-记录时间: 2026-09-21T03:30:57+08:00
 说明: 压测端与被测服务同机（环回），服务线程数见各项 --threads，wrk 线程数 -t2
 ---
 Running 30s test @ http://localhost:18980/bench/plaintext
   2 threads and 100 connections
   Thread Stats   Avg      Stdev     Max   +/- Stdev
-    Latency     2.44ms    0.92ms  14.81ms   72.42%
-    Req/Sec    19.88k     2.41k   26.36k    64.50%
-  1187458 requests in 30.02s, 204.97MB read
-Requests/sec:  39551.07
+    Latency     2.44ms    0.91ms  12.39ms   72.47%
+    Req/Sec    19.88k     2.31k   25.35k    63.17%
+  1187432 requests in 30.02s, 204.97MB read
+Requests/sec:  39555.05
 Transfer/sec:      6.83MB
